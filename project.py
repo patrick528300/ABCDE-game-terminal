@@ -544,6 +544,6 @@ def turns():
 
 def setup():
     turn = iter(turns())
-    if 
+    
 
 
