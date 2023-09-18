@@ -1,0 +1,535 @@
+Problem1：
+	"""
+        >>> usa = Empire("United States",New_York,american_colonies)
+        >>> usa.collect_tax()
+        245
+        >>> russia = Empire("Russia",Murmansk,russian_colonies)
+        >>> russia.collect_tax()
+        215 
+        >>> china = Empire("China",Shanghai,chinese_colonies)
+        >>> china.colony.append(american_colonies.pop())
+        >>> china.collect_tax()
+        235
+	"""
+
+Problem2
+	"""
+        >>> Recife.factory_built
+        False
+        >>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> uk.factory_built(Mumbai,'green')
+        This colony does not belong to this empire
+        >>> Mumbai.factory_built
+        False
+        >>> uk.build_factory(Recife,'red')
+        Successfully built
+        >>> Recife.factory_built
+        True
+        >>> uk.money
+        410
+        >>> uk.resource
+        {wood:3,metal:4,gold:0,sugar:0,fertilizer:0,oil:0}
+        >>> uk.build_factory(Recife,'green')         # red factory cannot be changed to green 
+        This colony already has a red factory      
+        >>> uk.build_factory(Newfoundland,'green')
+        Successfully built
+        >>> uk.build_factory(Newfoundland,'green')  # there should be only one factory whether it`s green or red#
+        This colony already has a green factory     
+        >>> uk.build_factory(Newfoundland,'red') 
+        Successfully built           
+        >>> uk.build_factory(Lagos,'green') 
+        Successfully built        
+        >>> Lagos.factory_built
+        True
+        >>> uk.build_factory(Freetown,'green')      
+        Insufficient resource(s) or money                   
+        >>> Freetown.factory_built
+        False
+        """
+
+Problem3
+	"""
+	>>> pirate = Empire("Pirates",Darwin,pirates_colonies)
+        >>> pirate.resource = {wood:0,metal:0,gold:0,sugar:0,fertilizer:0,oil:0}        #reassign
+        >>> Amsterdam.factory_built = True      # this is a wood factory
+        >>> Amsterdam.is_green = True           
+        >>> Cape_Verde.factory_built = True     # this is an arm factory
+        >>> Cape_Verde.is_green = True  
+        >>> Veracruz.factory_built = True       # this is a gold factory
+        >>> Veracruz.is_red = True 
+        >>> Suva.factory_built = True   # this is a fertilizer factory
+        >>> Suva.is_red = True
+        >>> pirate.get_resource()           # print out a summary: 
+        client: Pirates
+        wood: 1
+        metal: 0
+        gold: 2
+        sugar: 0
+        fertilizer: 2
+        oil: 0  
+        resource:            
+        {wood:6,metal:0,gold:2,sugar:0,fertilizer:2,oil:0}
+        >>> china = Empire("China",Shanghai,metal_colonies)
+        >>> china.resource = {wood:5,metal:0,gold:0,sugar:0,fertilizer:0,oil:0}     #reassign 
+        >>> for i in china.colony:
+        ...   i.factory_built = True
+        ...   i.is_green = True
+        ...
+        >>> china.colony[-1].is_green = False
+        >>> china.colony[-1].is_red = True
+        >>> china.get_resource()
+        client: China 
+        wood: 0
+        metal: 6
+        gold: 0
+        sugar: 0
+        fertilizer: 0
+        oil: 0   
+        resource: 
+        {wood:4,metal:6,gold:0,sugar:0,fertilizer:0,oil:0}    
+        """
+
+Problem4
+	"""
+	>>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> uk.build_ship(Newfoundland)         # Newfoundland is an oil colony
+        Arm factory is not supported there
+        >>> uk.build_ship(Buenos_Aires)
+        The arm factory is not built
+        >>> uk.build_ship(London)               # London is the capital of the United Kingdom
+        Successfully built
+        >>> London.ships                        #'ship'+self.name
+        ['ship_United_Kingdom']                  
+        >>> London.capacity  
+        2
+        >>> uk.money
+        410
+        >>> uk.resource
+        {wood:4,metal:4,gold:0,sugar:0,fertilizer:0,oil:0}
+        >>> uk.ships        #append 1 when there`s a new ship added
+        [1]                                     
+        >>> Buenos_Aires.factory_built = True
+        >>> uk.build_ship(Buenos_Aires)
+        Successfully built
+        >>> Buenos_Aires.ships                   #'ship'+self.name
+        ['ship_United_Kingdom']                 
+        >>> Buenos_Aires.capacity
+        2
+        >>> uk.ships                # append 1 when there`s a new ship added
+        [1,1]                                    
+        >>> Buenos_Aires.ships.extend(['ship_China','ship_Russia']) 
+        >>> Buenos_Aires.capacity = 0          # not available for parking
+        >>> uk.build_ship(Buenos_Aires)
+        No more space for the new ship
+        >>> uk.ships
+        [1,1]
+        >>> uk.money
+        370
+        >>> Buenos_Aires.ships
+        ['ship_United_Kingdom','ship_China','ship_Russia']
+        """
+
+Problem5a
+	"""
+	>>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> uk.resoure = {wood:0,metal:5,gold:0,fertilizer:0,sugar:0,oil:0}     # reassign
+        >>> russia = Empire("Russia",Murmansk,russian_colonies)
+        >>> russia.resoure = {wood:5,metal:0,gold:0,fertilizer:0,sugar:0,oil:0} 
+        >>> bank = Empire("Bank")
+        >>> uk.exchange_resource(bank,gold,'buy',70)
+        Successfully exchanged
+        >>> uk.money
+        380
+        >>> uk.exchange_resource(russia,wood,'buy',15)
+        Successfully exchanged
+        >>> uk.exchange_resource(russia,metal,'sell',25)
+        Successfully exchanged
+        >>> uk.exchange_resource(russia,sugar,'buy',30)
+        Insufficient resource
+        >>> uk.exchange_resource(russia,fertilizer,'sell',40)
+        Insufficient resource
+        >>> uk.money
+        390
+        >>> uk.resource
+        {wood:1,metal:4,gold:2,fertilizer:0,suagr:0,oil:0}
+        >>> russia.money
+        440
+        """
+
+Problem5b
+	"""
+	>>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> russia = Empire("Russia",Murmansk,russian_colonies)
+        >>> japan = Empire("Japan", Tokyo,japanese_colonies)
+        >>> uk.exchange_colony(russia,San_Francisco,'buy',150)
+        The opponent does not have this place
+        >>> uk.exchange_colony(russia,Port_Moresby,'buy',550) # uk.money -> 450
+        Insufficient fund 
+        >>> Port_Moresby.no_charge = True           # reassign
+        >>> uk.exchange_colony(russia,Port_Moresby,'buy',150)
+        Successful transaction
+        >>> Port_Moresby.no_charge
+        False
+        >>> uk.money
+        300
+        >>> russia.money
+        600
+        >>> japan.exchange_colony(uk,Tokyo,'sell',200)
+        Capital cannot be exchanged
+        >>> Tokyo in japan.colony
+        True
+        >>> Tokyo in uk.colony
+        False
+        """
+
+Problem6
+	"""
+	>>> china = Empire('China',Shanghai,chinese_colonies)
+        >>> china.buy_permit('senior')
+        Successful purchase
+        >>> china.permit        # append a string 'senior', or 'junior', to the permit list
+        ['senior']                  
+        >>> china.money
+        350
+        >>> china.buy_permit('senior')
+        There is alreay one same permit in the permit list
+        >>> china.money
+        350
+        >>> china.money = 20            # reassign the finance to $20
+        >>> china.buy_permit('junior')  # the price of junior permit is $50
+        Insufficient fund       
+        >>> senior              # the amount of senior permit reduced from 2
+        1
+        >>> junior              # on Line 8 & 9
+        3
+        >>> usa = Empire("United_States",New_York,american_colonies)
+        >>> usa.buy_permit('senior')
+        Successful purchase
+        >>> senior
+        0
+        >>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> russia = Empire("Russia",Murmansk,russian_colonies)
+        >>> japan = Empire("Japan", Tokyo,japanese_colonies)
+        >>> uk.buy_permit('senior')
+        This permit is sold out
+        >>> uk.buy_permit('junior')
+        Successful purchase
+        >>> usa.buy_permit('junior')
+        Successful purchase
+        >>> russia.buy_permit('junior')
+        Successful purchase
+        >>> japan.buy_permit('junior')
+        This permit is sold out
+        >>> junior
+        0
+        >>> uk.permit
+        ['junior']
+        >>> usa.permit
+        ['senior','junior']
+        >>> japan.permit
+        []
+        """
+
+Problem7
+	"""
+	>>> japan = Empire("Japan",Tokyo,japanese_colonies)
+        >>> japan.trade_start(Acapulco_De_Juarez,Manila)
+        trade route started!
+        >>> japan.on_trade
+        True
+        >>> japan.trade_end(London)
+        The destination does not match the trade route!
+        >>> japan.on_trade
+        True
+        >>> japan.trade_end(Manila)
+        Congrats! You completed the trade route!
+        merchant: Japan
+        start: Acapulco_De_Juarez
+        end: Manila
+        profit:
+        400
+        >>> japan.on_trade
+        False
+        >>> Japan.money
+        700
+        """
+
+Problem8
+	"""
+	>>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> uk.permit = ['junior']
+        >>> usa = Empire("United_States",New_York,american_colonies)
+        >>> usa.trade_start(Acapulco_De_Juarez,Manila)
+        trade route started!
+        >>> usa.route
+        [Acapulco_De_Juarez,Manila,400]
+        >>> uk.rob(usa,2,1,1,1)
+        United_Kingdom vs. United_States
+        United_Kingdom: 2
+        United_States: 1
+        Congrats! You won the battle!
+        But you get nothing because you don`t have a senior permit
+        >>> uk.robber
+        False
+        >>> usa.trade_start(Acapulco_De_Juarez,Manila)
+        trade route started!
+        >>> uk.permit = ['junior','senior']
+        >>> uk.rob(usa,2,1,1,1)
+        United_Kingdom vs. United_States
+        United_Kingdom: 2
+        United_States: 1
+        Congrats! You won the battle!
+        You have a senior permit, awesome! You are on trade now!
+        The Destination is: 
+        Manila
+        >>> uk.on_trade
+        True
+        >>> uk.robber
+        True
+        >>> uk.route
+        [Acapulco_De_Juarez,Manila,400]
+        >>> usa.on_trade
+        False
+        >>> usa.route
+        None
+        """
+
+Problem9
+	"""
+	>>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> uk.on_trade = True
+        >>> uk.is_robber = True
+        >>> uk.route = [Acapulco_De_Juarez,Manila,400]
+        >>> uk.trade_end_for_robber(Calcutta)
+        This is not a suitable destination!
+        >>> uk.on_trade
+        True
+        >>> uk.is_robber
+        True
+        >>> uk.trade_end_for_robber(Recife)
+        Congrats! You completed the trade route!
+        robber: United_Kingdom
+        end: Recife
+        profit:
+        150
+        >>> uk.is_robber
+        False
+        >>> uk.on_trade
+        True
+        >>> pirates = Empire("Pirates",Darwin,pirates_colonies)
+        >>> uk.on_trade = True
+        >>> uk.is_robber = True
+        >>> uk.route = [Acapulco_De_Juarez,Manila,400]
+        >>> uk.trade_end_for_robber(Mozambique)     # this is not a port
+        This is not a suitable destination!
+        >>> uk.trade_end_for_robber(Tokyo)     # this is a japanese port
+        This is not a suitable destination!
+        >>> uk.trade_end_for_robber(Veracruz)
+        Congrats! You completed the trade route!
+        robber: United_Kingdom
+        end: Veracruz
+        profit:
+        150
+        >>> uk.on_trade = True
+        >>> uk.is_robber = True
+        >>> uk.route = [Acapulco_De_Juarez,Manila,400]
+        >>> uk.trade_end_for_robber(Veracruz)
+        Congrats! You completed the trade route!
+        robber: United_Kingdom
+        end: Manila
+        profit:
+        400
+        >>> uk.money
+        1150
+        """
+
+Problem10
+	"""
+	>>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> china = Empire("China",Shanghai,chinese_colonies)
+        >>> uk.enter_place(Shanghai)
+        Successfully entered
+        >>> uk.money 
+        430
+        >>> china.money
+        470
+        >>> Shanghai.ships
+        ["ship_United_Kingdom"]
+        >>> Shanghai.capacity
+        2
+        >>> china.enter_place(Shanghai)
+        Successfully entered
+        >>> uk.enter_place(Shanghai,True)   # it is a merchant ship - no charge
+        Successfully entered
+        >>> china.money
+        470
+        >>> uk.enter_place(Shanghai)
+        The colony is full
+        >>> Shanghai.ships
+        ["ship_United_Kingdom","ship_China","ship_China"]
+        >>> Shanghai.cpacity
+        0
+        >>> china.money
+        470
+        >>> uk.leave_place(Shanghai)
+        Successfully left
+        >>> china.leave_place(Shanghai)
+        Successfully left
+        >>> uk.enter_place(Shanghai,False,True) # no charge
+        >>> china.money
+        470
+        >>> uk.money
+        430
+        >>> Shanghai.no_charge = True
+        >>> uk.enter_place(Shanghai) # no charge because I changed the attribute of the place to be no charge
+        >>> china.money
+        470
+        >>> uk.money
+        430
+        """
+
+Problem10b
+	"""
+	>>> uk = Empire("United_Kingdom",London,british_colonies)
+        >>> china = Empire("China",Shanghai,chinese_colonies)
+        >>> uk.pass_place(Shanghai)
+        Successfully passed
+        >>> uk.money 
+        430
+        >>> china.money
+        470
+        >>> Shanghai.ships
+        []
+        >>> Shanghai.capacity
+        2
+        >>> china.enter_place(Shanghai)
+        Successfully entered
+        >>> china.enter_place(Shanghai)
+        Successfully entered
+        >>> china.enter_place(Shanghai)
+        Successfully entered
+        >>> uk.pass_place(Shanghai)
+        Successfully passed
+        >>> Shanghai.ships
+        ["ship_China", "ship_China","ship_China"]
+        >>> Shanghai.capacity
+        0
+        >>> uk.money
+        410
+        >>> china.money
+        490
+        """
+
+Problem11
+	"""
+	>>> uk = United_Kingdom("United_Kongdom",London,british_colonies)
+        >>> uk.collect_tax()
+        325
+        >>> usa = Empire("United_States",New_York,american_colonies)
+        >>> uk.colony.append(usa.colony.pop())
+        >>> uk.colony.append(usa.colony.pop())
+        >>> uk.collect_tax()
+        385
+	"""
+
+Problem12
+	"""
+    	>>> russia = Russia("Russia",Murmansk,russian_colonies)
+    	>>> russia.resource
+    	{wood:5,metal:5,gold:0,sugar:0,fertilizer:0,oil:0}
+    	>>> russia.colony.append(Cape_Verde)
+    	>>> Cape_Verde.factory_built = True
+    	>>> Cape_Verde.is_green = True
+    	>>> russia.build_ship(Cape_Verde)
+    	Successfully built
+    	>>> russia.money
+    	430
+    	>>> russia.resource
+    	{wood:4,metal:5,gold:0,sugar:0,fertilizer:0,oil:0}
+    	>>> Cape_Verde.ships
+    	["ship_Russia"]
+    	>>> Cape_Verde.capacity
+    	2
+    	>>> russia.build_ship(Cape_Verde,metal)
+    	Successfully built
+    	>>> russia.resource
+    	{wood:4,metal:4,gold:0,sugar:0,fertilizer:0,oil:0}
+    	>>> russia.resource = {wood:0,metal:4,gold:0,sugar:0,fertilizer:0,oil:0} # reassign
+    	>>> russia.build_ship(Cape_Verde)
+    	Insufficient resource and/or money
+	"""
+
+Problem13
+	"""
+	>>> china = China("China",Shanghai,chinese_colonies)
+        >>> china.trade_start(Acapulco_De_Juarez,Manila)
+        trade route started!
+        >>> china.trade_end(Manila)
+        Congrats! You completed the trade route!
+        merchant: China
+        start: Acapulco_De_Juarez
+        end: Manila
+        profit:
+        400
+        >>> china.on_trade
+        False
+        >>> china.money
+        850
+	"""
+
+Problem14
+	"""
+        >>> pirates = Pirates("Pirates",Darwin,pirates_colonies)
+        >>> usa = Empire("United_States",New_York,american_colonies)
+        >>> Yaren.no_charge
+        False
+        >>> pirates.exchange_colony(usa, Yaren, 'buy')
+	Successfully exchanged
+        >>> Yaren.no_charge
+        True
+	"""
+
+Problem15a
+	"""
+	>>> usa = United_States("United_States",New_York,american_colonies)
+    	>>> usa.resource = {wood:0,metal:0,gold:0,sugar:0,fertilizer:0,oil:0}  # reassign
+    	>>> usa.build_factory(Recife,'red')
+    	Successfully built
+    	>>> Recife.factory_built
+    	True
+    	>>> Recife.is_red
+    	True
+    	>>> Recife.factory_americanized
+    	True 
+    	>>> usa.get_resource()
+    	client: Pirates
+    	wood: 2
+    	metal: 0
+   	gold: 0
+    	sugar: 0
+    	fertilizer: 0
+    	oil: 0  
+    	resource:            
+    	{wood:2,metal:0,gold:0,sugar:0,fertilizer:0,oil:0}
+    	>>> Cape_Verde in usa.colony
+    	False
+    	>>> usa.build_factory(Cape_Verde,'green')
+    	Successful built
+    	>>> usa.build_ship(Cape_Verde)
+    	Successfully built
+    	>>> Cape_Verde.ships
+    	["ship_United_States"]
+    	>>> Capde_Verde.capacity
+    	2
+    	>>> usa.money
+    	330
+	"""
+
+
+
+
+
+
+
+
+
