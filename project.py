@@ -517,7 +517,6 @@ def turns():
                     ,"Japan","Pirates","United States"]
         if turn % 5 == 0:
             
-            """BEGIN PROBLEM 16"""
             yield ("***Now it`s tax time***")
             yield ("News:")
            # i = rand(len(news))
@@ -537,7 +536,6 @@ def turns():
 
             yield ("Now it's a new era!")
 
-            """BEGIN PROBLEM 16"""
         elif turn == max_turns:
             return 'game over'
         turn += 1
