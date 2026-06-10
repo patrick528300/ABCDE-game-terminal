@@ -188,6 +188,21 @@ SKILLS = {
     "United States": "Factory building fee is halved; material use is unchanged",
 }
 
+AI_COUNTRY_PRIORITIES = {
+    "United Kingdom": "tax and port growth",
+    "Russia": "cheap warship building",
+    "China": "fee income and controlled ports",
+    "Japan": "open-access trade",
+    "Pirates": "raiding and pirate mobility; opening is dangerous because warships can erase pirates early",
+    "United States": "discounted factory growth",
+}
+
+AI_FACTORY_RESOURCE_PRIORITY = ["shipyard", "metal", "oil", "sugar", "gold", "wood", "fertilizer"]
+AI_FACTORY_RESOURCE_WEIGHTS = {
+    resource: len(AI_FACTORY_RESOURCE_PRIORITY) - index
+    for index, resource in enumerate(AI_FACTORY_RESOURCE_PRIORITY)
+}
+
 GAME_RULES = [
     "Objective",
     "Play until the configured final round. The final evaluation compares money, ports, factories, resources, completed trade, and war winrate.",
@@ -841,6 +856,19 @@ class PlayerState:
     oil_power_until: int = 0
     cash_history: list[int] = field(default_factory=list)
     historic_cash_peak_3_rounds: int = 0
+
+
+@dataclass
+class AIAgentState:
+    country: str
+    name: str
+    priority: str
+    decisions: int = 0
+    previous_metrics: dict[str, float] = field(default_factory=dict)
+    last_result: dict[str, float] = field(default_factory=dict)
+    rl_score: int = 0
+    last_rob_round: int = 0
+    last_warship_check_round: int = 0
 
 
 @dataclass
@@ -3858,6 +3886,19 @@ def trade_card_display_line(card: TradeCard) -> str:
 
 
 PIRATE_INTEL_COSTS = [5, 10, 20, 30, 50]
+PIRATE_WAIT_PORTS = [
+    "Lima",
+    "Cape_of_Good_Hope",
+    "Tierra_del_Fuego",
+    "Havana",
+    "Santo_Domingo",
+    "Newfoundland",
+    "Recife",
+    "Port_Louis",
+    "Jakarta",
+    "Honolulu",
+    "Male",
+]
 
 
 def pirate_intel_endpoint_candidates(exclude: str | None = None) -> list[str]:
@@ -6617,6 +6658,77 @@ def draw_identity_page(
     return card_rects, start_rect
 
 
+def draw_human_country_selection_page(
+    surface: pygame.Surface,
+    title_font: pygame.font.Font,
+    font: pygame.font.Font,
+    small_font: pygame.font.Font,
+    human_countries: set[str],
+    mouse_pos: tuple[int, int],
+) -> tuple[list[tuple[str, pygame.Rect]], pygame.Rect, pygame.Rect]:
+    surface.fill((18, 28, 38))
+    draw_text(
+        surface,
+        pygame.font.SysFont("arial", 44, True),
+        "Army Business Colony Diplomacy Empire",
+        (SCREEN_WIDTH // 2 - 410, 76),
+        (238, 242, 244),
+    )
+    draw_text(
+        surface,
+        font,
+        "Select the countries controlled by humans. Unselected countries will be played by AI.",
+        (SCREEN_WIDTH // 2 - 350, 136),
+        TEXT_MUTED,
+    )
+
+    card_rects: list[tuple[str, pygame.Rect]] = []
+    card_w = 250
+    card_h = 170
+    gap_x = 34
+    gap_y = 30
+    start_x = SCREEN_WIDTH // 2 - (card_w * 3 + gap_x * 2) // 2
+    start_y = 210
+    for idx, country in enumerate(EMPIRE_ORDER):
+        col = idx % 3
+        row = idx // 3
+        rect = pygame.Rect(start_x + col * (card_w + gap_x), start_y + row * (card_h + gap_y), card_w, card_h)
+        card_rects.append((country, rect))
+        selected = country in human_countries
+        hovered = rect.collidepoint(mouse_pos)
+        bg = (255, 252, 235) if selected else ((235, 240, 243) if hovered else (222, 227, 230))
+        border = OWNER_COLORS[country] if selected else ((162, 174, 184) if hovered else (96, 113, 124))
+        pygame.draw.rect(surface, bg, rect, border_radius=8)
+        pygame.draw.rect(surface, border, rect, 3 if selected else 2, border_radius=8)
+        draw_owner_marker(surface, country, (rect.x + 32, rect.y + 32), font, size=38)
+        draw_text(surface, title_font, country, (rect.x + 62, rect.y + 20), (22, 38, 52))
+        draw_text(surface, small_font, f"Capital: {display_place_name(CAPITALS[country])}", (rect.x + 22, rect.y + 68), (42, 58, 70))
+        draw_wrapped_text(
+            surface,
+            small_font,
+            SKILLS[country],
+            pygame.Rect(rect.x + 22, rect.y + 94, rect.width - 44, 46),
+            (58, 72, 82),
+            3,
+        )
+        label = "Human" if selected else "AI"
+        label_color = (42, 105, 72) if selected else (157, 63, 58)
+        draw_text(surface, small_font, label, (rect.right - 58, rect.bottom - 28), label_color)
+
+    start_rect = pygame.Rect(SCREEN_WIDTH // 2 - 216, SCREEN_HEIGHT - 86, 184, 44)
+    enabled = bool(human_countries)
+    pygame.draw.rect(surface, (54, 130, 94) if enabled else (130, 138, 142), start_rect, border_radius=7)
+    pygame.draw.rect(surface, (224, 232, 238), start_rect, 1, border_radius=7)
+    draw_text(surface, font, "Start Game", (start_rect.x + 44, start_rect.y + 12), TEXT)
+    auto_rect = pygame.Rect(SCREEN_WIDTH // 2 + 32, SCREEN_HEIGHT - 86, 184, 44)
+    pygame.draw.rect(surface, (67, 132, 221), auto_rect, border_radius=7)
+    pygame.draw.rect(surface, (224, 232, 238), auto_rect, 1, border_radius=7)
+    draw_text(surface, font, "Auto 60 Rounds", (auto_rect.x + 26, auto_rect.y + 12), TEXT)
+    if not enabled:
+        draw_text(surface, small_font, "Choose at least one human country, or run Auto 60 Rounds.", (SCREEN_WIDTH // 2 - 184, start_rect.y - 26), (255, 214, 109))
+    return card_rects, start_rect, auto_rect
+
+
 def validate_map_data() -> None:
     port_names = set(NOTEBOOK_PORT_ORDER)
     missing_coords = port_names - set(PORT_GEO_COORDS)
@@ -6724,6 +6836,7 @@ def main() -> int:
     pirate_intel_close_rect = pygame.Rect(0, 0, 0, 0)
     pirate_intel_lines: list[str] = []
     pirate_intel_clicks = 0
+    pirate_intel_targets: list[str] = []
     treaty_open = False
     treaty_close_rect = pygame.Rect(0, 0, 0, 0)
     treaty_save_rect = pygame.Rect(0, 0, 0, 0)
@@ -6752,6 +6865,8 @@ def main() -> int:
     resource_prices = initial_resource_prices()
     price_increase_by_window: dict[int, int] = {}
     battle_power_penalties: dict[int, int] = {}
+    pirate_last_rob_round = round_number
+    pirate_port_raid_bonus_until = 0
     last_price_drop_round = round_number
     transfer_open = False
     transfer_close_rect = pygame.Rect(0, 0, 0, 0)
@@ -6816,11 +6931,156 @@ def main() -> int:
     identity_selected_card: int | None = None
     identity_card_rects: list[pygame.Rect] = []
     identity_start_rect = pygame.Rect(0, 0, 0, 0)
-    pirate_last_rob_round = round_number
-    pirate_port_raid_bonus_until = 0
+    human_selection_open = True
+    human_countries: set[str] = {"United Kingdom"}
+    human_country_rects: list[tuple[str, pygame.Rect]] = []
+    human_selection_start_rect = pygame.Rect(0, 0, 0, 0)
+    auto_simulation_rect = pygame.Rect(0, 0, 0, 0)
+    auto_simulation_active = False
+    ai_turn_wait_until = 0
+    baseline_agent = AIAgentState("baseline", "baseline", "continue voyages and random connected sailing")
+    ai_agents = {
+        country: AIAgentState(country, f"{country} agent", AI_COUNTRY_PRIORITIES[country])
+        for country in EMPIRE_ORDER
+    }
+    ai_rejections: dict[str, dict[str, int]] = {country: {} for country in EMPIRE_ORDER}
 
     def active_player() -> PlayerState:
         return players[active_player_idx]
+
+    def active_player_is_ai() -> bool:
+        return active_player().country not in human_countries
+
+    def ai_metrics(player: PlayerState) -> dict[str, float]:
+        factories = sum(
+            1
+            for node in MAP_NODES.values()
+            if node.factory_owner == player.country and node.factory_level
+        )
+        return {
+            "money": float(player.money),
+            "resources": float(sum(player.resources.get(resource, 0) for resource in RESOURCE_ORDER)),
+            "ports": float(len(player.ports)),
+            "factories": float(factories),
+            "war_winrate": war_winrates(history_events).get(player.country, 0.0),
+        }
+
+    def ai_result_delta(before: dict[str, float], after: dict[str, float]) -> dict[str, float]:
+        return {key: after.get(key, 0.0) - before.get(key, 0.0) for key in after}
+
+    def remember_ai_result(agent: AIAgentState, before: dict[str, float], after: dict[str, float]) -> None:
+        agent.decisions += 1
+        agent.previous_metrics = after
+        agent.last_result = ai_result_delta(before, after)
+        details = [
+            f"priority: {agent.priority}",
+            f"money {agent.last_result['money']:+.0f}, resources {agent.last_result['resources']:+.0f}",
+            f"ports {agent.last_result['ports']:+.0f}, factories {agent.last_result['factories']:+.0f}",
+            f"war winrate {agent.last_result['war_winrate']:+.0%}",
+        ]
+        history_events.append(HistoryEvent(round_number, "ai", f"{agent.name} updated memory", details))
+
+    def player_warship_count(player: PlayerState) -> int:
+        return sum(1 for ship in player.ships if ship.kind == "Warship")
+
+    def ai_warship_rl_delta(player: PlayerState) -> tuple[int, str]:
+        count = player_warship_count(player)
+        if count == 0:
+            return -10, "warship = 0"
+        if count < 2:
+            return -5, "warship < 2"
+        if 2 < count < 6:
+            return 5, "2 < warship < 6"
+        excess_threshold = 12 if player.country == "Russia" else 10
+        if count > excess_threshold:
+            return -5, f"warship > {excess_threshold}"
+        return 0, "neutral warship count"
+
+    def apply_ai_warship_rl_checks() -> None:
+        for player in players:
+            if player.country in human_countries:
+                continue
+            agent = ai_agents[player.country]
+            if agent.last_warship_check_round == round_number:
+                continue
+            delta, reason = ai_warship_rl_delta(player)
+            agent.last_warship_check_round = round_number
+            if not delta:
+                continue
+            agent.rl_score += delta
+            sign = "+" if delta > 0 else ""
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    f"{player.country} RL warship check",
+                    [
+                        f"{sign}{delta} score",
+                        reason,
+                        f"Warships: {player_warship_count(player)}",
+                        f"RL score: {agent.rl_score}",
+                    ],
+                )
+            )
+
+    def player_total_resources(player: PlayerState) -> int:
+        return sum(player.resources.get(resource, 0) for resource in RESOURCE_ORDER)
+
+    def player_factory_count(player: PlayerState) -> int:
+        return sum(
+            1
+            for node in MAP_NODES.values()
+            if node.factory_owner == player.country and node.factory_level
+        )
+
+    def completed_trade_stats(player: PlayerState) -> tuple[int, int]:
+        total_profit = 0
+        completed_routes = 0
+        prefix = f"{player.country} completed a trade route"
+        for event in history_events:
+            if event.kind != "trade" or event.title != prefix:
+                continue
+            completed_routes += 1
+            for detail in event.details:
+                if detail.startswith("Profit: $"):
+                    total_profit += int(detail.removeprefix("Profit: $"))
+                    break
+        return total_profit, completed_routes
+
+    def china_expansion_mode(player: PlayerState) -> bool:
+        _profit, routes = completed_trade_stats(player)
+        return routes > 15 and player_factory_count(player) > 6
+
+    def ai_attack_ship_target_for_ship(player: PlayerState, ship: Ship) -> Ship | None:
+        if ship_is_enroute(ship) or not ship_can_attack(ship, players):
+            return None
+        targets = []
+        for target in attackable_enemy_ships(ship, players):
+            if ship_is_enroute(target):
+                continue
+            if player.country == "Russia" and target.kind not in ("Warship", "Pirate"):
+                continue
+            if target.location != ship.location and course_distance_between(ship.location, target.location) is None:
+                continue
+            priority = 10
+            if player.country == "Russia" and target.kind == "Warship":
+                priority += 100
+            elif player.country == "Russia" and target.kind == "Pirate":
+                priority += 90
+            elif player.country == "China" and target.kind == "Warship":
+                priority += 70
+            elif target.kind == "Merchant" and target.trade_card:
+                priority += 50
+            elif target.kind == "Merchant":
+                priority += 30
+            targets.append((target, priority))
+        if not targets:
+            return None
+        targets.sort(key=lambda item: (item[1], item[0].kind, item[0].name), reverse=True)
+        return targets[0][0]
+
+    def pirate_agent() -> AIAgentState:
+        return ai_agents["Pirates"]
 
     def apply_pirate_inactivity_port_loss() -> None:
         nonlocal pirate_last_rob_round
@@ -6845,6 +7105,7 @@ def main() -> int:
             lost_port.factory_owner = receiver.country
         refresh_player_ports(players)
         pirate_last_rob_round = round_number
+        pirate_agent().last_rob_round = round_number
         history_events.append(
             HistoryEvent(
                 round_number,
@@ -6882,10 +7143,992 @@ def main() -> int:
             )
         )
 
+    def update_combat_rl_score(
+        prompt: AttackPrompt,
+        attack_result: dict[str, int | str | bool],
+        defender_was_pirates: bool,
+        defender_was_loaded_merchant: bool,
+    ) -> None:
+        if prompt.attacker.kind == "Warship" and prompt.attacker.owner != "Pirates" and defender_was_pirates:
+            agent = pirate_agent()
+            agent.rl_score -= 5
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    "Pirates RL score penalized",
+                    ["-5 for being attacked by a warship.", f"RL score: {agent.rl_score}"],
+                )
+            )
+        if prompt.attacker.owner == "Pirates":
+            agent = pirate_agent()
+            if isinstance(prompt.defender, MapNode):
+                points = -5 if prompt.defender.kind == "choking" else -10
+                agent.rl_score += points
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        "Pirates RL score updated",
+                        [
+                            f"{points} for attacking {'choking' if prompt.defender.kind == 'choking' else 'port'}",
+                            f"Target: {display_place_name(prompt.defender.name)}",
+                            f"RL score: {agent.rl_score}",
+                        ],
+                    )
+                )
+            elif (
+                isinstance(prompt.defender, Ship)
+                and prompt.defender.kind == "Merchant"
+                and attack_result.get("action_kind") == "rob"
+                and attack_result.get("winner") == "Pirates"
+            ):
+                points = 100 if defender_was_loaded_merchant else 50
+                agent.rl_score += points
+                agent.last_rob_round = round_number
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        "Pirates RL score updated",
+                        [
+                            f"+{points} for attacking merchant",
+                            "Loaded merchant attacked" if defender_was_loaded_merchant else "Empty merchant attacked",
+                            f"RL score: {agent.rl_score}",
+                        ],
+                    )
+                )
+        if prompt.attacker.owner == "Russia":
+            agent = ai_agents["Russia"]
+            points = 0
+            reason = ""
+            if isinstance(prompt.defender, MapNode):
+                points = 20 if prompt.defender.kind == "choking" else 10
+                reason = f"attacked {'choking' if prompt.defender.kind == 'choking' else 'port'}"
+            elif isinstance(prompt.defender, Ship) and prompt.defender.kind == "Warship":
+                points = 15
+                reason = "attacked warship"
+            if points:
+                agent.rl_score += points
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        "Russia RL score updated",
+                        [f"+{points} for {reason}", f"RL score: {agent.rl_score}"],
+                    )
+                )
+
+    def apply_pirate_rl_decay() -> None:
+        agent = pirate_agent()
+        if round_number - agent.last_rob_round >= 5:
+            agent.rl_score -= 50
+            agent.last_rob_round = round_number
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    "Pirates RL score decayed",
+                    ["-50: no ship robbed a merchant within 5 rounds.", f"RL score: {agent.rl_score}"],
+                )
+            )
+
+    def ai_consider_post_factory_purchase(player: PlayerState, node: MapNode) -> None:
+        if node.resource in ("wood", "sugar") and random.random() < 0.40:
+            if try_buy_resource(player, "fertilizer", resource_prices, round_number):
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{player.country} AI bought fertilizer after factory build",
+                        [f"Factory resource: {node.resource}", f"Money now ${player.money}"],
+                    )
+                )
+
+    def ai_consider_sugar_purchase(player: PlayerState) -> None:
+        window_distance = sum(ship.distance_since_upkeep for ship in player.ships)
+        if window_distance > 20 and random.random() < 0.70:
+            if try_buy_resource(player, "sugar", resource_prices, round_number):
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{player.country} AI bought sugar for long routes",
+                        [f"5-round mileage estimate: {window_distance}"],
+                    )
+                )
+
+    def ai_maybe_use_sugar_speed(player: PlayerState, ship: Ship) -> str:
+        if player.resources.get("sugar", 0) <= 0 or ship.sugar_speed_active:
+            return "continue"
+        if ship.course_distance > 8:
+            chance = 0.80
+        elif ship.course_distance > 5:
+            chance = 0.50
+        else:
+            return "continue"
+        if random.random() >= chance:
+            return "continue"
+        player.resources["sugar"] -= 1
+        ship.sugar_speed_active = True
+        record_transaction(player, round_number, 0, f"AI used sugar for {ship.name} speed")
+        history_events.append(
+            HistoryEvent(
+                round_number,
+                "ai",
+                f"{player.country} AI used sugar speed",
+                [f"{ship.name}", f"Course distance: {ship.course_distance}"],
+            )
+        )
+        return "speed"
+
+    def buy_missing_materials(player: PlayerState, cost: dict[str, int]) -> None:
+        for resource in ("wood", "metal"):
+            while player.resources.get(resource, 0) < cost.get(resource, 0):
+                if not try_buy_resource(player, resource, resource_prices, round_number):
+                    break
+
+    def ai_sell_resources_by_priority(player: PlayerState, priority: list[str], target_money: int | None = None, max_units: int | None = None) -> int:
+        sold = 0
+        for resource in priority:
+            while player.resources.get(resource, 0) > 0:
+                if target_money is not None and player.money >= target_money:
+                    return sold
+                if max_units is not None and sold >= max_units:
+                    return sold
+                if not try_sell_resource(player, resource, resource_prices, round_number):
+                    return sold
+                sold += 1
+        return sold
+
+    def ai_handle_low_money(player: PlayerState) -> bool:
+        if player.money >= 150:
+            return False
+        sold = ai_sell_resources_by_priority(
+            player,
+            ["gold", "oil", "sugar", "fertilizer", "wood", "metal"],
+            target_money=150,
+        )
+        if sold:
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    f"{player.country} AI sold resources for cash",
+                    [f"Sold {sold} unit(s)", f"Money now ${player.money}"],
+                )
+            )
+        return player.money < 150
+
+    def ai_factory_candidates(player: PlayerState) -> list[tuple[MapNode, str, int]]:
+        candidates = []
+        for node in player.ports:
+            if node.kind == "capital" or node.resource is None:
+                continue
+            for action in ("red", "green", "upgrade"):
+                cost = cost_for_player(player, FACTORY_COSTS[action], "factory")
+                simulated_money = player.money
+                for resource in ("wood", "metal"):
+                    missing = max(0, cost.get(resource, 0) - player.resources.get(resource, 0))
+                    simulated_money -= missing * resource_prices[resource]["buy"]
+                if simulated_money < dynamic_bill(cost, resource_prices):
+                    continue
+                if action == "green" and node.factory_level is not None:
+                    continue
+                if action == "red" and node.factory_level is not None:
+                    continue
+                if action == "upgrade" and node.factory_level != "green":
+                    continue
+                if player.country == "Pirates" and node.resource == "shipyard":
+                    continue
+                weight = AI_FACTORY_RESOURCE_WEIGHTS.get(node.resource or "", 1)
+                candidates.append((node, action, weight))
+        return candidates
+
+    def ai_try_build_factory(agent: AIAgentState, player: PlayerState, force: bool = False) -> bool:
+        if not force and not (player_total_resources(player) > 4 and random.random() < 0.60):
+            return False
+        candidates = ai_factory_candidates(player)
+        while candidates:
+            node, action, _weight = random.choices(candidates, weights=[item[2] for item in candidates], k=1)[0]
+            cost = cost_for_player(player, FACTORY_COSTS[action], "factory")
+            buy_missing_materials(player, cost)
+            if build_factory(player, node, action, resource_prices, round_number, history_events):
+                ai_consider_post_factory_purchase(player, node)
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{agent.name} chose factory",
+                        [
+                            f"{action} factory at {display_place_name(node.name)}",
+                            f"resource priority: {node.resource or 'none'}",
+                        ],
+                    )
+                )
+                return True
+            candidates = [candidate for candidate in candidates if candidate[0] is not node or candidate[1] != action]
+        return False
+
+    def ai_shipyard_candidates(player: PlayerState, ship_kind: str) -> list[MapNode]:
+        ports = [
+            node
+            for node in player.ports
+            if node.owner == player.country and (node.kind == "capital" or (node.resource == "shipyard" and node.factory_level))
+        ]
+        capital = CAPITALS.get(player.country)
+        ports.sort(key=lambda node: (0 if node.name == capital else 1, node.name))
+        return ports
+
+    def ai_try_queue_ship(agent: AIAgentState, player: PlayerState, force: bool = False) -> bool:
+        ship_kind = "Pirate" if player.country == "Pirates" else "Warship"
+        needs_warship = player.country != "Pirates" and player_warship_count(player) < 2
+        if not force and not (needs_warship and random.random() < 0.70):
+            return False
+        for node in ai_shipyard_candidates(player, ship_kind):
+            actual_kind = "Pirate" if player.country == "Pirates" else ship_kind
+            cost = cost_for_player(player, SHIP_COSTS.get(actual_kind, SHIP_COSTS["Warship"]), "ship")
+            buy_missing_materials(player, cost)
+            if queue_ship_build(
+                player,
+                node,
+                ship_kind,
+                players,
+                pending_ship_builds,
+                round_number,
+                resource_prices,
+                history_events,
+            ):
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{agent.name} chose ship build",
+                        [f"{actual_kind} at {display_place_name(node.name)}", "Missing materials were bought when affordable."],
+                    )
+                )
+                return True
+        return False
+
+    def ai_try_declare_trade(player: PlayerState) -> bool:
+        for ship in player.ships:
+            if ship_is_enroute(ship) or ship.kind != "Merchant" or ship.trade_card:
+                continue
+            if declare_trade_for_ship(player, ship, ship.location):
+                card = ship.trade_card
+                if card:
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "invest",
+                            f"{player.country} AI declared a trade route",
+                            [
+                                f"{card.start} -> {card.end}",
+                                f"Destination: {display_place_name(ship.trade_destination or '')}",
+                                f"Ship: {ship.name}",
+                            ],
+                        )
+                    )
+                return True
+        return False
+
+    def ai_try_invest(agent: AIAgentState, player: PlayerState, force: bool = False) -> bool:
+        if player.country == "Pirates":
+            return False
+        cost = active_trade_card_cost(active_news)
+        if player.money < cost:
+            return False
+        if not force and not (player.money > 500 and random.random() < 0.50):
+            return False
+        options = draw_trade_card_options()
+        if not options:
+            return False
+        chosen_template = max(options, key=lambda card: card.profit)
+        player.money -= cost
+        record_transaction(player, round_number, -cost, "AI invest in trade cards")
+        chosen = choose_trade_card(player, chosen_template)
+        history_events.append(
+            HistoryEvent(
+                round_number,
+                "invest",
+                f"{agent.name} invested in trade cards",
+                [f"Cost: ${cost}", f"Selected: {chosen.start} -> {chosen.end}", f"Profit: ${chosen.profit}"],
+            )
+        )
+        ai_try_declare_trade(player)
+        return True
+
+    def ai_port_priority(node: MapNode, country: str) -> int:
+        resource_priority = {
+            "shipyard": 80,
+            "oil": 70,
+            "metal": 60,
+            "wood": 50,
+            "gold": 40,
+            "sugar": 30,
+            "fertilizer": 20,
+        }
+        score = resource_priority.get(node.resource or "", 10)
+        if node.kind == "choking":
+            score += 100
+        if node.factory_level:
+            score += 150 if country == "Russia" else 70
+        if node.owner == country:
+            score += 30
+        if country == "Russia":
+            score += {
+                "choking": 120,
+                "shipyard": 100,
+                "oil": 80,
+                "metal": 70,
+                "wood": 60,
+                "gold": 50,
+                "sugar": 40,
+                "fertilizer": 30,
+            }.get(node.resource or node.kind, 0)
+        return score
+
+    def shortest_port_path(start: str, goal: str) -> list[str]:
+        if start == goal:
+            return [start]
+        frontier = [(start, [start])]
+        seen = {start}
+        while frontier:
+            current, path = frontier.pop(0)
+            for neighbor, _distance in COURSE_GRAPH.get(current, []):
+                if neighbor in seen:
+                    continue
+                if neighbor == goal:
+                    return [*path, neighbor]
+                seen.add(neighbor)
+                frontier.append((neighbor, [*path, neighbor]))
+        return []
+
+    def shortest_port_distance(start: str, goal: str) -> int | None:
+        if start == goal:
+            return 0
+        frontier = [(start, 0)]
+        seen = {start}
+        while frontier:
+            current, distance_so_far = frontier.pop(0)
+            for neighbor, distance in COURSE_GRAPH.get(current, []):
+                if neighbor in seen:
+                    continue
+                new_distance = distance_so_far + distance
+                if neighbor == goal:
+                    return new_distance
+                seen.add(neighbor)
+                frontier.append((neighbor, new_distance))
+        return None
+
+    def ai_choking_destination(ship: Ship) -> str | None:
+        choking_ports = [
+            node.name
+            for node in MAP_NODES.values()
+            if node.kind == "choking" and node.name != ship.location
+        ]
+        choking_ports.sort(
+            key=lambda port: shortest_port_distance(ship.location, port)
+            if shortest_port_distance(ship.location, port) is not None
+            else 10_000
+        )
+        for port in choking_ports[:5]:
+            path = shortest_port_path(ship.location, port)
+            if len(path) > 1:
+                return path[1]
+        return None
+
+    def ai_reject_recent_attackers(player: PlayerState) -> None:
+        if player.country == "Pirates":
+            return
+        rejections = ai_rejections[player.country]
+        for event in history_events:
+            if event.kind != "war" or round_number - event.round_number > 3:
+                continue
+            if ": " not in event.title or " vs " not in event.title:
+                continue
+            attacker, defender = event.title.split(": ", 1)[1].split(" vs ", 1)
+            if defender == player.country:
+                rejections[attacker] = event.round_number + 3
+        expired = [country for country, expire_round in rejections.items() if round_number > expire_round]
+        for country in expired:
+            del rejections[country]
+        for node in player.ports:
+            for country in expired:
+                node.entry_countries.discard(country)
+            if rejections:
+                node.entry_mode = "reject_selected"
+                node.entry_countries.update(rejections)
+            elif node.entry_mode == "reject_selected" and not node.entry_countries:
+                node.entry_mode = "default"
+        if rejections or expired:
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    f"{player.country} AI updated port entry",
+                    [f"Rejected: {', '.join(sorted(rejections)) or 'none'}", f"Restored: {', '.join(sorted(expired)) or 'none'}"],
+                )
+            )
+
+    def ai_buy_gold_before_attack(player: PlayerState) -> int:
+        if player.money < 300:
+            return 0
+        bought = 0
+        target = 2 if player.money > 700 else 1
+        while bought < target and try_buy_resource(player, "gold", resource_prices, round_number):
+            bought += 1
+        return bought
+
+    def ai_sell_gold_after_attack(player: PlayerState, amount: int) -> None:
+        for _ in range(amount):
+            if not try_sell_resource(player, "gold", resource_prices, round_number):
+                break
+
+    def ai_attack_destination_for_ship(player: PlayerState, ship: Ship) -> str | None:
+        if ship_is_enroute(ship) or not ship_can_attack(ship, players):
+            return None
+        candidates = []
+        for destination, _distance in COURSE_GRAPH.get(ship.location, []):
+            node = MAP_NODES[destination]
+            if node.owner == player.country or node.kind == "capital":
+                continue
+            if can_attack_defender(ship, node):
+                priority = ai_port_priority(node, player.country)
+                if player.country == "Russia":
+                    priority += russia_phase_target_bonus(node)
+                    if russia_port_has_warship_guard(node):
+                        priority -= 250
+                candidates.append((destination, priority))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        return random.choice(candidates[: min(3, len(candidates))])[0]
+
+    def russia_port_has_warship_guard(node: MapNode) -> bool:
+        if not node.owner:
+            return False
+        defender = player_by_country(players, node.owner)
+        if not defender:
+            return False
+        return any(ship.kind == "Warship" and not ship_is_enroute(ship) and ship.location == node.name for ship in defender.ships)
+
+    def russia_phase_target_bonus(node: MapNode) -> int:
+        ocean = port_ocean_label(node)
+        if round_number <= 20:
+            australia_ports = {"Perth", "Sydney", "Wellington", "Port_Moresby", "Suva"}
+            if ocean == "Arctic Ocean":
+                return 240
+            if node.name in australia_ports:
+                return 220
+            if ocean == "Pacific Ocean":
+                return 180
+            return 0
+        if round_number <= 40:
+            if ocean == "Atlantic Ocean" and node.lat < 5:
+                return 240
+            return 0
+        caribbean_ports = {"Havana", "Santo_Domingo", "Maracaibo", "Colon", "Veracruz", "New_Orleans", "Jacksonville"}
+        southeast_asia_ports = {"Singapore", "Jakarta", "Timor", "Manila", "Hong_Kong", "Yangon", "Port_Moresby"}
+        if node.name in caribbean_ports:
+            return 260
+        if ocean == "Indian Ocean" and node.lat >= 0:
+            return 230
+        if node.name in southeast_asia_ports:
+            return 220
+        return 0
+
+    def ai_loaded_merchant_guard_destination(player: PlayerState, ship: Ship) -> str | None:
+        if ship.kind != "Warship" or ship_is_enroute(ship):
+            return None
+        loaded_merchants = [
+            own_ship
+            for own_ship in player.ships
+            if own_ship.kind == "Merchant" and own_ship.trade_card and not ship_is_enroute(own_ship)
+        ]
+        for merchant in loaded_merchants:
+            path = shortest_port_path(ship.location, merchant.location)
+            if 1 < len(path) <= 10:
+                return path[1]
+        return None
+
+    def ai_factory_guard_destination(player: PlayerState, ship: Ship) -> str | None:
+        if ship.kind != "Warship" or ship_is_enroute(ship):
+            return None
+        factory_ports = [
+            node
+            for node in MAP_NODES.values()
+            if node.owner == player.country and node.factory_owner == player.country and node.factory_level
+        ]
+        if not factory_ports:
+            return None
+        guarded_locations = {
+            own_ship.location
+            for own_ship in player.ships
+            if own_ship is not ship and own_ship.kind == "Warship" and not ship_is_enroute(own_ship)
+        }
+        factory_ports.sort(key=lambda node: (node.name in guarded_locations, -ai_port_priority(node, player.country), node.name))
+        for node in factory_ports:
+            if node.name == ship.location:
+                return None
+            path = shortest_port_path(ship.location, node.name)
+            if len(path) > 1:
+                return path[1]
+        return None
+
+    def ai_pirate_target(player: PlayerState, ship: Ship) -> Ship | None:
+        if ship_is_enroute(ship) or not ship_can_attack(ship, players):
+            return None
+        pool = ai_pirate_merchant_targets(ship, loaded_only=False, max_distance=12)
+        if not pool:
+            return None
+        loaded = [target for target in pool if target.trade_card]
+        pool = loaded or pool
+        pool.sort(key=lambda target: (shortest_port_distance(ship.location, target.location) or 999, target.owner, target.name))
+        return pool[0]
+
+    def merchant_has_close_warship_guard(target: Ship) -> bool:
+        if ship_is_enroute(target):
+            return False
+        owner = player_by_country(players, target.owner)
+        if not owner:
+            return False
+        for ship in owner.ships:
+            if ship.kind != "Warship" or ship_is_enroute(ship):
+                continue
+            distance = shortest_port_distance(ship.location, target.location)
+            if distance is not None and distance < 4:
+                return True
+        return False
+
+    def ai_pirate_merchant_targets(ship: Ship, loaded_only: bool, max_distance: int) -> list[Ship]:
+        targets = []
+        if ship_is_enroute(ship):
+            return targets
+        for player in players:
+            if player.country == "Pirates":
+                continue
+            for target in player.ships:
+                if target.kind != "Merchant" or ship_is_enroute(target):
+                    continue
+                if loaded_only and not target.trade_card:
+                    continue
+                if not loaded_only and target.trade_card:
+                    continue
+                distance = shortest_port_distance(ship.location, target.location)
+                if distance is not None and distance < max_distance:
+                    targets.append(target)
+        targets.sort(key=lambda target: (shortest_port_distance(ship.location, target.location) or 999, target.owner, target.name))
+        return targets
+
+    def pirate_target_limits(target: Ship) -> tuple[int, int]:
+        return (2, 4) if target.trade_card else (1, 2)
+
+    def pirate_support_count_for_target(target: Ship) -> int:
+        count = 0
+        for pirate_player_state in players:
+            if pirate_player_state.country != "Pirates":
+                continue
+            for pirate in pirate_player_state.ships:
+                if pirate.kind != "Pirate":
+                    continue
+                if ship_is_enroute(pirate) and pirate.destination == target.location:
+                    count += 1
+                    continue
+                distance = shortest_port_distance(pirate.location, target.location)
+                if distance is not None and distance <= 2:
+                    count += 1
+        return count
+
+    def ai_choose_pirate_merchant_target(ship: Ship, candidates: list[Ship]) -> Ship | None:
+        viable = []
+        for target in candidates:
+            minimum, maximum = pirate_target_limits(target)
+            support = pirate_support_count_for_target(target)
+            if support >= maximum:
+                continue
+            distance = shortest_port_distance(ship.location, target.location)
+            viable.append((target, support < minimum, distance if distance is not None else 999))
+        if not viable:
+            return None
+        viable.sort(key=lambda item: (not item[1], item[2], item[0].owner, item[0].name))
+        return viable[0][0]
+
+    def ai_move_pirate_toward_ship(pirate: Ship, target: Ship) -> bool:
+        if target.location == pirate.location:
+            return True
+        path = shortest_port_path(pirate.location, target.location)
+        if len(path) < 2:
+            return False
+        return move_ship_toward(pirate, path[1], players, active_news, round_number)
+
+    def pirate_has_visible_merchant_target(player: PlayerState) -> bool:
+        for ship in player.ships:
+            if ship.kind != "Pirate" or ship_is_enroute(ship):
+                continue
+            if ai_pirate_merchant_targets(ship, loaded_only=True, max_distance=12):
+                return True
+            if ai_pirate_merchant_targets(ship, loaded_only=False, max_distance=12):
+                return True
+        return False
+
+    def ai_try_pirate_intelligence(agent: AIAgentState, player: PlayerState) -> None:
+        nonlocal pirate_intel_clicks, pirate_intel_lines, pirate_intel_targets
+        if pirate_intel_clicks >= len(PIRATE_INTEL_COSTS):
+            return
+        if pirate_has_visible_merchant_target(player):
+            return
+        chances = [0.90, 0.60, 0.40, 0.30, 0.10]
+        if random.random() >= chances[pirate_intel_clicks]:
+            return
+        cost = PIRATE_INTEL_COSTS[pirate_intel_clicks]
+        if player.money < cost:
+            return
+        player.money -= cost
+        pirate_intel_clicks += 1
+        lines, targets = generate_pirate_intelligence(players, port_storage_by_port)
+        pirate_intel_lines = lines
+        if random.random() < 0.50:
+            pirate_intel_targets = targets
+            belief = "believed"
+        else:
+            belief = "ignored"
+        record_transaction(player, round_number, -cost, "AI pirate intelligence")
+        history_events.append(
+            HistoryEvent(
+                round_number,
+                "ai",
+                f"{agent.name} bought pirate intelligence",
+                [f"Cost: ${cost}", f"Check: {pirate_intel_clicks}/5", f"AI {belief} the report."],
+            )
+        )
+
+    def ai_pirate_intel_destination(ship: Ship) -> str | None:
+        if not pirate_intel_targets or random.random() >= 0.50:
+            return None
+        candidates = [
+            port
+            for port in pirate_intel_targets
+            if port in MAP_NODES and port != ship.location and shortest_port_distance(ship.location, port) is not None
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda port: (shortest_port_distance(ship.location, port) or 999, port))
+        path = shortest_port_path(ship.location, candidates[0])
+        return path[1] if len(path) > 1 else None
+
+    def ai_pirate_wait_destination(ship: Ship) -> str | None:
+        candidates = [
+            port
+            for port in PIRATE_WAIT_PORTS
+            if port in MAP_NODES
+            and port != ship.location
+            and shortest_port_distance(ship.location, port) is not None
+            and can_ship_enter_port(ship, port, active_news, players, player_by_country(players, ship.owner), round_number=round_number)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda port: (shortest_port_distance(ship.location, port) or 999, port))
+        path = shortest_port_path(ship.location, candidates[0])
+        return path[1] if len(path) > 1 else None
+
+    def ai_pirate_distance_from_warship(warship: Ship, pirate: Ship) -> int | None:
+        if pirate.location == warship.location:
+            return 0
+        return shortest_port_distance(warship.location, pirate.location)
+
+    def ai_nearby_pirate_for_enforce(warship: Ship) -> Ship | None:
+        if warship.kind != "Warship" or ship_is_enroute(warship) or not ship_can_attack(warship, players):
+            return None
+        candidates: list[tuple[Ship, int, float]] = []
+        for player in players:
+            if player.country != "Pirates":
+                continue
+            for pirate in player.ships:
+                if pirate.kind != "Pirate":
+                    continue
+                distance = ai_pirate_distance_from_warship(warship, pirate)
+                if distance is None or distance > 3:
+                    continue
+                if not ship_is_enroute(pirate) and pirate.location in PIRATE_WAIT_PORTS:
+                    chance = 0.60
+                elif ship_is_enroute(pirate):
+                    chance = 0.40
+                else:
+                    chance = 0.20
+                candidates.append((pirate, distance, chance))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[1], 0 if item[0].location in PIRATE_WAIT_PORTS else 1, item[0].name))
+        target, _distance, chance = candidates[0]
+        return target if random.random() < chance else None
+
+    def ai_try_enforce_nearby_pirate(agent: AIAgentState, player: PlayerState, ship: Ship) -> bool:
+        nonlocal pending_attack, attack_result
+        if player.country == "Pirates":
+            return False
+        target = ai_nearby_pirate_for_enforce(ship)
+        if not target:
+            return False
+        old_location = ship.location
+        if target.location == ship.location:
+            pending_attack = AttackPrompt(ship, target, "AI pirate enforcement", ship.location)
+            attack_result = None
+            resolve_pending_attack_once()
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    f"{agent.name} enforced against pirates",
+                    [f"{ship.name} at {display_place_name(old_location)}", f"Target: {target.name}"],
+                )
+            )
+            mark_ship_done(ship)
+            return True
+        if ship_is_enroute(target):
+            old_pos = ship_screen_position(ship)
+            if move_ship_to_intercept(ship, target, active_news):
+                check_attack_after_move(ship, old_pos, True)
+                if pending_attack:
+                    resolve_pending_attack_once()
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{agent.name} intercepted pirates for enforcement",
+                        [f"{ship.name} from {display_place_name(old_location)}", f"Target: {target.name}"],
+                    )
+                )
+                mark_ship_done(ship)
+                return True
+            return False
+        old_pos = ship_screen_position(ship)
+        if move_ship_toward(ship, target.location, players, active_news, round_number):
+            ship.attack_on_arrival = True
+            check_attack_after_move(ship, old_pos, True)
+            if pending_attack:
+                resolve_pending_attack_once()
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    f"{agent.name} moved to enforce against pirates",
+                    [f"{ship.name}: {display_place_name(old_location)} -> {display_place_name(target.location)}", f"Target: {target.name}"],
+                )
+            )
+            mark_ship_done(ship)
+            return True
+        return False
+
+    def ai_run_pirate_strategy(agent: AIAgentState, player: PlayerState, ship: Ship) -> bool:
+        nonlocal pending_attack, attack_result
+        if ship.kind != "Pirate" or ship_is_enroute(ship):
+            return False
+        loaded_targets = ai_pirate_merchant_targets(ship, loaded_only=True, max_distance=12)
+        empty_targets = ai_pirate_merchant_targets(ship, loaded_only=False, max_distance=12)
+        early_mode = round_number <= 10 and not loaded_targets
+        roll = random.random()
+        target: Ship | None = None
+        if early_mode:
+            if roll < 0.70 and empty_targets:
+                target = ai_choose_pirate_merchant_target(ship, empty_targets)
+        elif loaded_targets:
+            if roll < 0.70:
+                target = ai_choose_pirate_merchant_target(ship, loaded_targets)
+            elif roll < 0.90 and empty_targets:
+                target = ai_choose_pirate_merchant_target(ship, empty_targets)
+        else:
+            if roll < 0.30 and empty_targets:
+                target = ai_choose_pirate_merchant_target(ship, empty_targets)
+            elif roll < 0.60:
+                ai_try_build_factory(agent, player)
+        if target:
+            approach_chance = 0.40 if merchant_has_close_warship_guard(target) else 0.70
+            if random.random() < approach_chance:
+                old_location = ship.location
+                gold_bought = ai_buy_gold_before_attack(player)
+                if ai_move_pirate_toward_ship(ship, target):
+                    if ship.location == target.location and ships_can_fight(ship, target, players):
+                        minimum, _maximum = pirate_target_limits(target)
+                        if pirate_support_count_for_target(target) >= minimum:
+                            defender = attack_defender_for_target(ship, target)
+                            location = defender.name if isinstance(defender, MapNode) else ship.location
+                            pending_attack = AttackPrompt(ship, defender, "AI pirate hunt", location)
+                            attack_result = None
+                            resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} hunted a merchant",
+                            [f"{ship.name}: {display_place_name(old_location)} -> {display_place_name(ship.location)}", f"Target: {target.owner} {target.name}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    return True
+        intel_destination = ai_pirate_intel_destination(ship)
+        if intel_destination and move_ship_toward(ship, intel_destination, players, active_news, round_number):
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    f"{agent.name} followed pirate intelligence",
+                    [f"{ship.name} -> {display_place_name(intel_destination)}"],
+                )
+            )
+            mark_ship_done(ship)
+            return True
+        if random.random() < 0.50:
+            wait_destination = ai_pirate_wait_destination(ship)
+            if wait_destination and move_ship_toward(ship, wait_destination, players, active_news, round_number):
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{agent.name} moved to a pirate waiting area",
+                        [f"{ship.name} -> {display_place_name(wait_destination)}"],
+                    )
+                )
+                mark_ship_done(ship)
+                return True
+        destination = ai_choking_destination(ship)
+        if destination and move_ship_toward(ship, destination, players, active_news, round_number):
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    f"{agent.name} moved toward a choking point",
+                    [f"{ship.name} -> {display_place_name(destination)}"],
+                )
+            )
+            mark_ship_done(ship)
+            return True
+        return False
+
+    def run_country_agent_decisions(agent: AIAgentState, player: PlayerState) -> None:
+        if player.country in human_countries:
+            return
+        ai_reject_recent_attackers(player)
+        ai_consider_sugar_purchase(player)
+        if player.country == "Pirates":
+            apply_pirate_rl_decay()
+            ai_try_pirate_intelligence(agent, player)
+        still_cash_poor = ai_handle_low_money(player)
+        if player.country == "Russia" and still_cash_poor:
+            history_events.append(
+                HistoryEvent(
+                    round_number,
+                    "ai",
+                    "Russia AI held position",
+                    ["Money below $150 after selling resources.", "Expansion paused."],
+                )
+            )
+            return
+        if agent.decisions == 0:
+            if player.country == "United States":
+                ai_try_build_factory(agent, player, force=True)
+            elif player.country == "Russia":
+                ai_try_queue_ship(agent, player, force=True)
+            elif player.country in ("United Kingdom", "China", "Japan"):
+                ai_try_invest(agent, player, force=True)
+            elif player.country == "Pirates":
+                ai_try_queue_ship(agent, player, force=True)
+        if player.country == "United States":
+            if player_factory_count(player) > 5:
+                sold = ai_sell_resources_by_priority(
+                    player,
+                    ["fertilizer", "sugar", "oil", "wood", "metal", "gold"],
+                    max_units=4,
+                )
+                if sold:
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            "United States AI sold factory surplus",
+                            [f"Sold {sold} unit(s)", "Priority: fertilizer, sugar, oil, wood, metal, gold"],
+                        )
+                    )
+            roll = random.random()
+            if roll < 0.50:
+                ai_try_invest(agent, player)
+            elif roll < 0.90:
+                ai_try_build_factory(agent, player)
+            else:
+                return
+        elif player.country == "Russia":
+            if player.money < 350:
+                ai_try_invest(agent, player)
+                ai_try_build_factory(agent, player)
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        "Russia AI paused expansion",
+                        ["Money below $350.", "Prioritized trade and factories."],
+                    )
+                )
+                return
+            if len(player.ports) > 15:
+                if random.random() < 0.60:
+                    ai_try_build_factory(agent, player, force=True)
+                else:
+                    ai_try_invest(agent, player, force=True)
+                return
+            if player_warship_count(player) > 10:
+                roll = random.random()
+                if roll < 0.20:
+                    ai_try_invest(agent, player, force=True)
+                elif roll < 0.40:
+                    ai_try_build_factory(agent, player, force=True)
+                else:
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            "Russia AI prepared offensive movement",
+                            ["Warships > 10.", "Priority: choking, factory, shipyard, oil, metal, wood, gold, sugar, fertilizer."],
+                        )
+                    )
+                return
+            ai_try_queue_ship(agent, player, force=True)
+            ai_try_queue_ship(agent, player)
+        elif player.country in ("United Kingdom", "China", "Japan"):
+            if player.country == "China" and china_expansion_mode(player):
+                roll = random.random()
+                if roll < 0.10:
+                    if try_buy_resource(player, "gold", resource_prices, round_number):
+                        history_events.append(
+                            HistoryEvent(round_number, "ai", "China AI bought gold", [f"Money now ${player.money}"])
+                        )
+                else:
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            "China AI prepared aggressive expansion",
+                            ["Trade routes > 15 and factories > 6.", "Warship actions use 50% port, 10% warship, 10% gold, 20% guard, 10% search."],
+                        )
+                    )
+                return
+            if player.country == "China":
+                if random.random() < 0.50:
+                    ai_try_invest(agent, player, force=True)
+                else:
+                    ai_try_build_factory(agent, player, force=True)
+                return
+            ai_try_invest(agent, player)
+            if player_total_resources(player) > 4:
+                ai_try_build_factory(agent, player)
+        else:
+            ai_try_queue_ship(agent, player)
+
     def finish_game() -> None:
-        nonlocal game_over, show_game_over_popup, game_over_evaluation, game_over_export_path
+        nonlocal game_over, show_game_over_popup, game_over_evaluation, game_over_export_path, auto_simulation_active
         if game_over:
             return
+        auto_simulation_active = False
         update_cash_records(players)
         game_over_evaluation = evaluate_players(players, history_events, resource_prices)
         history_events.append(
@@ -6951,11 +8194,16 @@ def main() -> int:
             history_events,
         )
         if completed_round % 5 == 0:
+            apply_ai_warship_rl_checks()
             new_events = [create_maritime_news(round_number), create_economic_news(round_number, resource_prices)]
             active_news.extend(new_events)
             append_news_history(history_events, round_number, new_events)
-            news_popup_events = new_events
-            news_popup_until = pygame.time.get_ticks() + 10000
+            if auto_simulation_active:
+                news_popup_events = []
+                news_popup_until = 0
+            else:
+                news_popup_events = new_events
+                news_popup_until = pygame.time.get_ticks() + 10000
             last_tax_summary = collect_taxes(players, round_number)
             history_events.append(
                 HistoryEvent(
@@ -7024,10 +8272,11 @@ def main() -> int:
             finish_game()
 
     def resolve_pending_attack_once() -> None:
-        nonlocal attack_result, last_price_drop_round, selected_ship, combat_popup_text, combat_popup_until
+        nonlocal pending_attack, attack_result, last_price_drop_round, selected_ship, combat_popup_text, combat_popup_until
         nonlocal pirate_last_rob_round, pirate_port_raid_bonus_until
         if not pending_attack:
             return
+        attacker_country = pending_attack.attacker.owner
         attacker_player = player_by_country(players, pending_attack.attacker.owner)
         if not can_take_action(attacker_player):
             return
@@ -7035,6 +8284,7 @@ def main() -> int:
             _, action_label, _ = combat_action(pending_attack)
             attacker_player.money -= 20
             record_transaction(attacker_player, round_number, -20, f"{action_label} start cost")
+        defender_was_pirates = entity_owner(pending_attack.defender) == "Pirates"
         defender_was_loaded_merchant = (
             isinstance(pending_attack.defender, Ship)
             and pending_attack.defender.kind == "Merchant"
@@ -7061,22 +8311,6 @@ def main() -> int:
                 pirate_robbed_merchant_owner,
                 attack_result.get("winner") == "Pirates",
             )
-        if (
-            pending_attack.attacker.owner == "Pirates"
-            and attack_result.get("action_kind") == "rob"
-            and attack_result.get("winner") == "Pirates"
-        ):
-            pirate_last_rob_round = round_number
-            if defender_was_loaded_merchant:
-                pirate_port_raid_bonus_until = round_number + 5
-                history_events.append(
-                    HistoryEvent(
-                        round_number,
-                        "war",
-                        "Pirates gained port raid momentum",
-                        ["Loaded merchant robbed.", f"Enemy port power -1 through R{pirate_port_raid_bonus_until}."],
-                    )
-                )
         price_increase = (0, 0)
         if attack_result["is_war"]:
             price_increase = apply_war_price_increase(
@@ -7092,6 +8326,24 @@ def main() -> int:
             price_increase,
             resource_prices,
         )
+        update_combat_rl_score(pending_attack, attack_result, defender_was_pirates, defender_was_loaded_merchant)
+        if (
+            pending_attack.attacker.owner == "Pirates"
+            and attack_result.get("action_kind") == "rob"
+            and attack_result.get("winner") == "Pirates"
+        ):
+            pirate_last_rob_round = round_number
+            pirate_agent().last_rob_round = round_number
+            if defender_was_loaded_merchant:
+                pirate_port_raid_bonus_until = round_number + 5
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "war",
+                        "Pirates gained port raid momentum",
+                        ["Loaded merchant robbed.", f"Enemy port power -1 through R{pirate_port_raid_bonus_until}."],
+                    )
+                )
         combat_popup_text = combat_result_summary(attack_result)
         combat_popup_until = pygame.time.get_ticks() + 5000
         captured_port = str(attack_result.get("captured_port") or "")
@@ -7114,6 +8366,9 @@ def main() -> int:
             process_ship_arrival(pending_attack.attacker)
         if selected_ship and player_for_ship(players, selected_ship) is None:
             selected_ship = None
+        if attacker_country not in human_countries:
+            pending_attack = None
+            attack_result = None
 
     def process_ship_arrival(ship: Ship) -> None:
         charge_ship_arrival_upkeep(ship, players, round_number, history_events)
@@ -7232,7 +8487,7 @@ def main() -> int:
         nonlocal game_over_evaluation, game_over_export_path
         nonlocal acted_ship_ids, ports_expanded, selected_ship
         nonlocal trade_card_options, selected_trade_card, trade_card_confirmed, treaties
-        nonlocal pirate_intel_open, pirate_intel_lines, pirate_intel_clicks
+        nonlocal pirate_intel_open, pirate_intel_lines, pirate_intel_clicks, pirate_intel_targets
         nonlocal last_tax_summary, last_resource_summary, last_maintenance_summary, last_storage_fee_summary
         nonlocal last_trade_summary, pending_ship_builds, port_storage_by_port, pending_goods_transfers
         nonlocal transfer_from_ports, transfer_to_ports, transfer_from_ships, transfer_to_ships
@@ -7242,6 +8497,8 @@ def main() -> int:
         nonlocal rules_open, rules_scroll, rules_max_scroll, overview_open, overview_scroll, overview_max_scroll
         nonlocal active_news, news_popup_events, news_popup_until
         nonlocal identity_screen_open, identity_card_countries, identity_selected_card
+        nonlocal human_selection_open, human_countries, human_country_rects, human_selection_start_rect
+        nonlocal auto_simulation_rect, auto_simulation_active, ai_turn_wait_until
         nonlocal combat_popup_text, combat_popup_until
         nonlocal pirate_last_rob_round, pirate_port_raid_bonus_until
         players = randomize_game()
@@ -7270,6 +8527,7 @@ def main() -> int:
         pirate_intel_open = False
         pirate_intel_lines = []
         pirate_intel_clicks = 0
+        pirate_intel_targets = []
         treaties = []
         last_tax_summary = {}
         last_resource_summary = {}
@@ -7282,14 +8540,14 @@ def main() -> int:
         news_popup_until = 0
         combat_popup_text = ""
         combat_popup_until = 0
-        pirate_last_rob_round = round_number
-        pirate_port_raid_bonus_until = 0
         pending_ship_builds = []
         port_storage_by_port = defaultdict(list)
         pending_goods_transfers = []
         resource_prices = initial_resource_prices()
         price_increase_by_window = {}
         battle_power_penalties = {}
+        pirate_last_rob_round = round_number
+        pirate_port_raid_bonus_until = 0
         last_price_drop_round = round_number
         transfer_from_ports = set()
         transfer_to_ports = set()
@@ -7314,10 +8572,53 @@ def main() -> int:
         identity_card_countries = list(EMPIRE_ORDER)
         random.shuffle(identity_card_countries)
         identity_selected_card = None
+        human_selection_open = True
+        human_countries = {"United Kingdom"}
+        human_country_rects = []
+        human_selection_start_rect = pygame.Rect(0, 0, 0, 0)
+        auto_simulation_rect = pygame.Rect(0, 0, 0, 0)
+        auto_simulation_active = False
+        ai_turn_wait_until = 0
+        for rejections in ai_rejections.values():
+            rejections.clear()
+        baseline_agent.decisions = 0
+        baseline_agent.previous_metrics = {}
+        baseline_agent.last_result = {}
+        for agent in ai_agents.values():
+            agent.decisions = 0
+            agent.previous_metrics = {}
+            agent.last_result = {}
+            agent.rl_score = 0
+            agent.last_rob_round = 0
+            agent.last_warship_check_round = 0
+
+    def start_auto_simulation() -> None:
+        nonlocal human_selection_open, human_countries, max_rounds, auto_simulation_active
+        nonlocal selected_idx, active_player_idx, ai_turn_wait_until
+        restart_game()
+        human_selection_open = False
+        human_countries = set()
+        max_rounds = 60
+        auto_simulation_active = True
+        selected_idx = active_player_idx
+        ai_turn_wait_until = 0
+        history_events.append(
+            HistoryEvent(
+                round_number,
+                "ai",
+                "Auto simulation started",
+                [
+                    "Six AI agents control all countries for 60 rounds.",
+                    "Pirates start with eight ships, but early pirate ships are vulnerable to warships.",
+                    "History log will be exported automatically at game end.",
+                ],
+            )
+        )
+        begin_active_player_turn()
 
     def open_trade_card_choices() -> None:
         nonlocal trade_card_options, selected_trade_card, trade_card_open, market_open, trade_card_confirmed
-        nonlocal pirate_intel_open, pirate_intel_lines, pirate_intel_clicks
+        nonlocal pirate_intel_open, pirate_intel_lines, pirate_intel_clicks, pirate_intel_targets
         nonlocal history_open, build_open, new_ship_open, rules_open, overview_open
         player = players[selected_idx]
         if player.country == "Pirates":
@@ -7328,7 +8629,7 @@ def main() -> int:
                 return
             player.money -= cost
             pirate_intel_clicks += 1
-            pirate_intel_lines, _targets = generate_pirate_intelligence(players, port_storage_by_port)
+            pirate_intel_lines, pirate_intel_targets = generate_pirate_intelligence(players, port_storage_by_port)
             record_transaction(player, round_number, -cost, "pirate intelligence")
             history_events.append(
                 HistoryEvent(
@@ -7682,6 +8983,514 @@ def main() -> int:
         resolve_pending_attack_once()
         mark_ship_done(current)
 
+    def russia_guard_score(node: MapNode, player: PlayerState) -> int:
+        if node.owner != player.country:
+            return 0
+        score = 0
+        if node.name == CAPITALS[player.country]:
+            score += 400
+        if node.kind == "choking":
+            score += 300
+        if node.factory_owner == player.country and node.factory_level:
+            score += 250
+        for own_ship in player.ships:
+            if own_ship.kind != "Merchant":
+                continue
+            if own_ship.location == node.name:
+                score += 120
+            if own_ship.trade_destination == node.name:
+                score += 100
+            if own_ship.trade_card and node.name in (own_ship.trade_card.start, own_ship.trade_card.end):
+                score += 80
+        return score
+
+    def ai_russia_guard_destination(player: PlayerState, ship: Ship) -> str | None:
+        candidates = [
+            node
+            for node in MAP_NODES.values()
+            if russia_guard_score(node, player) > 0 and node.name != ship.location
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda node: (
+                -russia_guard_score(node, player),
+                shortest_port_distance(ship.location, node.name) if shortest_port_distance(ship.location, node.name) is not None else 10_000,
+                node.name,
+            )
+        )
+        for node in candidates:
+            path = shortest_port_path(ship.location, node.name)
+            if len(path) > 1:
+                return path[1]
+        return None
+
+    def ai_run_russia_warship_strategy(
+        agent: AIAgentState,
+        player: PlayerState,
+        ship: Ship,
+        destinations: list[str],
+    ) -> bool:
+        nonlocal pending_attack, attack_result
+        if ship.kind != "Warship" or ship_is_enroute(ship) or not ship_can_attack(ship, players):
+            return False
+        roll = random.random()
+        if roll < 0.20:
+            node = MAP_NODES.get(ship.location)
+            if node and russia_guard_score(node, player) > 0:
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{agent.name} guarded a strategic port",
+                        [f"{ship.name} guarded {display_place_name(ship.location)}"],
+                    )
+                )
+                mark_ship_done(ship)
+                return True
+            guard_destination = ai_russia_guard_destination(player, ship)
+            if guard_destination:
+                old_location = ship.location
+                old_pos = ship_screen_position(ship)
+                if move_ship_toward(ship, guard_destination, players, active_news, round_number):
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} moved to guard a strategic port",
+                            [f"{ship.name}", f"{display_place_name(old_location)} -> {display_place_name(guard_destination)}"],
+                        )
+                    )
+                    check_attack_after_move(ship, old_pos, False)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    mark_ship_done(ship)
+                    return True
+        elif roll < 0.70:
+            attack_destination = ai_attack_destination_for_ship(player, ship)
+            if attack_destination:
+                old_location = ship.location
+                old_pos = ship_screen_position(ship)
+                gold_bought = ai_buy_gold_before_attack(player)
+                if move_ship_toward(ship, attack_destination, players, active_news, round_number):
+                    check_attack_after_move(ship, old_pos, True)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} attacked a priority port",
+                            [f"{ship.name}", f"{display_place_name(old_location)} -> {display_place_name(attack_destination)}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    return True
+                ai_sell_gold_after_attack(player, gold_bought)
+        elif roll < 0.80:
+            attack_target = ai_attack_ship_target_for_ship(player, ship)
+            if attack_target:
+                old_location = ship.location
+                gold_bought = ai_buy_gold_before_attack(player)
+                if attack_target.location == ship.location:
+                    defender = attack_defender_for_target(ship, attack_target)
+                    location = defender.name if isinstance(defender, MapNode) else ship.location
+                    pending_attack = AttackPrompt(ship, defender, "AI ship attack", location)
+                    attack_result = None
+                    resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} attacked an enemy ship",
+                            [f"{ship.name} at {display_place_name(old_location)}", f"Target: {attack_target.owner} {attack_target.kind} {attack_target.name}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    return True
+                old_pos = ship_screen_position(ship)
+                if move_ship_toward(ship, attack_target.location, players, active_news, round_number):
+                    ship.attack_on_arrival = True
+                    check_attack_after_move(ship, old_pos, True)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} moved to attack an enemy ship",
+                            [f"{ship.name}: {display_place_name(old_location)} -> {display_place_name(attack_target.location)}", f"Target: {attack_target.owner} {attack_target.kind} {attack_target.name}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    return True
+                ai_sell_gold_after_attack(player, gold_bought)
+        if destinations:
+            destination = random.choice(destinations)
+            old_location = ship.location
+            old_pos = ship_screen_position(ship)
+            if move_ship_toward(ship, destination, players, active_news, round_number):
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{agent.name} patrolled with a warship",
+                        [f"{ship.name}", f"{display_place_name(old_location)} -> {display_place_name(destination)}"],
+                    )
+                )
+                check_attack_after_move(ship, old_pos, False)
+                if pending_attack:
+                    resolve_pending_attack_once()
+                mark_ship_done(ship)
+                return True
+        return False
+
+    def ai_china_warship_target(ship: Ship) -> Ship | None:
+        targets = [
+            target
+            for opponent in players
+            if opponent.country != "China"
+            for target in opponent.ships
+            if target.kind == "Warship"
+            and not ship_is_enroute(target)
+            and course_distance_between(ship.location, target.location) is not None
+        ]
+        if not targets:
+            return None
+        targets.sort(key=lambda target: (shortest_port_distance(ship.location, target.location) or 10_000, target.owner, target.name))
+        return targets[0]
+
+    def ai_priority_guard_destination(player: PlayerState, ship: Ship) -> str | None:
+        candidates = [
+            node
+            for node in MAP_NODES.values()
+            if node.owner == player.country and node.name != ship.location and node.kind != "capital"
+        ]
+        candidates.sort(key=lambda node: (-ai_port_priority(node, player.country), shortest_port_distance(ship.location, node.name) or 10_000, node.name))
+        for node in candidates:
+            path = shortest_port_path(ship.location, node.name)
+            if len(path) > 1:
+                return path[1]
+        return None
+
+    def ai_run_china_advanced_strategy(
+        agent: AIAgentState,
+        player: PlayerState,
+        ship: Ship,
+        destinations: list[str],
+    ) -> bool:
+        nonlocal pending_attack, attack_result
+        if not china_expansion_mode(player) or ship.kind != "Warship" or ship_is_enroute(ship):
+            return False
+        roll = random.random()
+        if roll < 0.50:
+            attack_destination = ai_attack_destination_for_ship(player, ship)
+            if attack_destination:
+                old_location = ship.location
+                old_pos = ship_screen_position(ship)
+                gold_bought = ai_buy_gold_before_attack(player)
+                if move_ship_toward(ship, attack_destination, players, active_news, round_number):
+                    check_attack_after_move(ship, old_pos, True)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} attacked a port in advanced mode",
+                            [f"{ship.name}", f"{display_place_name(old_location)} -> {display_place_name(attack_destination)}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    return True
+                ai_sell_gold_after_attack(player, gold_bought)
+        elif roll < 0.60:
+            target = ai_china_warship_target(ship)
+            if target:
+                old_location = ship.location
+                gold_bought = ai_buy_gold_before_attack(player)
+                if target.location == ship.location:
+                    defender = attack_defender_for_target(ship, target)
+                    location = defender.name if isinstance(defender, MapNode) else ship.location
+                    pending_attack = AttackPrompt(ship, defender, "AI China warship attack", location)
+                    attack_result = None
+                    resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    mark_ship_done(ship)
+                    return True
+                old_pos = ship_screen_position(ship)
+                if move_ship_toward(ship, target.location, players, active_news, round_number):
+                    ship.attack_on_arrival = True
+                    check_attack_after_move(ship, old_pos, True)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} hunted a warship in advanced mode",
+                            [f"{ship.name}: {display_place_name(old_location)} -> {display_place_name(target.location)}", f"Target: {target.owner} {target.name}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    return True
+                ai_sell_gold_after_attack(player, gold_bought)
+        elif roll < 0.70:
+            if try_buy_resource(player, "gold", resource_prices, round_number):
+                history_events.append(
+                    HistoryEvent(round_number, "ai", "China AI bought gold in advanced mode", [f"Money now ${player.money}"])
+                )
+            mark_ship_done(ship)
+            return True
+        elif roll < 0.90:
+            node = MAP_NODES.get(ship.location)
+            if node and node.owner == player.country and ai_port_priority(node, player.country) >= 80:
+                history_events.append(
+                    HistoryEvent(round_number, "ai", f"{agent.name} guarded a port in advanced mode", [f"{ship.name} guarded {display_place_name(ship.location)}"])
+                )
+                mark_ship_done(ship)
+                return True
+            guard_destination = ai_priority_guard_destination(player, ship)
+            if guard_destination:
+                old_location = ship.location
+                old_pos = ship_screen_position(ship)
+                if move_ship_toward(ship, guard_destination, players, active_news, round_number):
+                    check_attack_after_move(ship, old_pos, False)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} moved to guard a port in advanced mode",
+                            [f"{ship.name}: {display_place_name(old_location)} -> {display_place_name(guard_destination)}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    return True
+        if destinations:
+            destination = ai_choking_destination(ship) or random.choice(destinations)
+            old_location = ship.location
+            old_pos = ship_screen_position(ship)
+            if move_ship_toward(ship, destination, players, active_news, round_number):
+                check_attack_after_move(ship, old_pos, False)
+                if pending_attack:
+                    resolve_pending_attack_once()
+                history_events.append(
+                    HistoryEvent(
+                        round_number,
+                        "ai",
+                        f"{agent.name} searched for targets in advanced mode",
+                        [f"{ship.name}: {display_place_name(old_location)} -> {display_place_name(destination)}"],
+                    )
+                )
+                mark_ship_done(ship)
+                return True
+        return False
+
+    def run_ai_turn() -> None:
+        nonlocal selected_ship, ai_turn_wait_until, pending_attack, attack_result
+        player = active_player()
+        agent = ai_agents[player.country]
+        before_metrics = ai_metrics(player)
+        history_events.append(
+            HistoryEvent(
+                round_number=round_number,
+                kind="ai",
+                title=f"AI turn: {player.country}",
+                details=[
+                    f"agent: {agent.name}",
+                    f"priority: {agent.priority}",
+                    f"movement policy: {baseline_agent.name}",
+                ],
+            )
+        )
+        run_country_agent_decisions(agent, player)
+        selected_ship = None
+        for ship in list(operable_ships()):
+            if pending_attack or game_over:
+                break
+            if ship_is_enroute(ship):
+                old_pos = ship_screen_position(ship)
+                sail_action = ai_maybe_use_sugar_speed(player, ship)
+                advance_ship(ship, players, active_news, round_number)
+                check_attack_after_move(ship, old_pos, ship.attack_on_arrival)
+                if pending_attack:
+                    resolve_pending_attack_once()
+                if not ship_is_enroute(ship) and not pending_attack:
+                    process_ship_arrival(ship)
+                    ship.attack_on_arrival = False
+                    complete_trade_if_ready(ship, players, round_number, history_events, last_trade_summary)
+                elif ship_is_enroute(ship):
+                    record_sail_limit_action(ship, sail_action)
+                mark_ship_done(ship)
+                continue
+
+            destinations = [
+                neighbor
+                for neighbor, _distance in COURSE_GRAPH.get(ship.location, [])
+                if can_ship_enter_port(ship, neighbor, active_news, players, player, round_number=round_number)
+            ]
+            if not destinations:
+                mark_ship_done(ship)
+                continue
+            if player.country == "Russia" and player.money < 150:
+                mark_ship_done(ship)
+                continue
+            if ship.kind == "Warship" and ai_try_enforce_nearby_pirate(agent, player, ship):
+                continue
+            if player.country == "Russia" and ship.kind == "Warship":
+                if ai_run_russia_warship_strategy(agent, player, ship, destinations):
+                    continue
+            if player.country == "China" and china_expansion_mode(player) and ship.kind == "Warship":
+                if ai_run_china_advanced_strategy(agent, player, ship, destinations):
+                    continue
+            if player.country == "United States":
+                factory_guard_destination = ai_factory_guard_destination(player, ship)
+                if factory_guard_destination:
+                    old_location = ship.location
+                    old_pos = ship_screen_position(ship)
+                    if move_ship_toward(ship, factory_guard_destination, players, active_news, round_number):
+                        history_events.append(
+                            HistoryEvent(
+                                round_number,
+                                "ai",
+                                f"{agent.name} guarded a factory port",
+                                [f"{ship.name}", f"{display_place_name(old_location)} -> {display_place_name(factory_guard_destination)}"],
+                            )
+                        )
+                        check_attack_after_move(ship, old_pos, False)
+                        if pending_attack:
+                            resolve_pending_attack_once()
+                        mark_ship_done(ship)
+                        continue
+            if player.country == "Pirates":
+                if ai_run_pirate_strategy(agent, player, ship):
+                    continue
+            guard_destination = ai_loaded_merchant_guard_destination(player, ship)
+            if guard_destination and random.random() < 0.50:
+                old_location = ship.location
+                old_pos = ship_screen_position(ship)
+                if move_ship_toward(ship, guard_destination, players, active_news, round_number):
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} guarded a loaded merchant",
+                            [f"{ship.name}", f"{display_place_name(old_location)} -> {display_place_name(guard_destination)}"],
+                        )
+                    )
+                    check_attack_after_move(ship, old_pos, False)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    mark_ship_done(ship)
+                    continue
+            attack_chance = {
+                "United States": 0.10,
+                "United Kingdom": 0.25,
+                "China": 0.50 if china_expansion_mode(player) else 0.25,
+                "Japan": 0.25,
+            }.get(player.country, 0.0)
+            attack_target = ai_attack_ship_target_for_ship(player, ship) if player.country == "China" and random.random() < attack_chance else None
+            if attack_target:
+                old_location = ship.location
+                gold_bought = ai_buy_gold_before_attack(player)
+                if attack_target.location == ship.location:
+                    defender = attack_defender_for_target(ship, attack_target)
+                    location = defender.name if isinstance(defender, MapNode) else ship.location
+                    pending_attack = AttackPrompt(ship, defender, "AI ship attack", location)
+                    attack_result = None
+                    resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} attacked an enemy ship",
+                            [f"{ship.name} at {display_place_name(old_location)}", f"Target: {attack_target.owner} {attack_target.kind} {attack_target.name}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    continue
+                old_pos = ship_screen_position(ship)
+                if move_ship_toward(ship, attack_target.location, players, active_news, round_number):
+                    ship.attack_on_arrival = True
+                    check_attack_after_move(ship, old_pos, True)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} moved to attack an enemy ship",
+                            [f"{ship.name}: {display_place_name(old_location)} -> {display_place_name(attack_target.location)}", f"Target: {attack_target.owner} {attack_target.kind} {attack_target.name}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    continue
+                ai_sell_gold_after_attack(player, gold_bought)
+            attack_destination = ai_attack_destination_for_ship(player, ship) if random.random() < attack_chance else None
+            if attack_destination:
+                old_location = ship.location
+                old_pos = ship_screen_position(ship)
+                gold_bought = ai_buy_gold_before_attack(player)
+                if move_ship_toward(ship, attack_destination, players, active_news, round_number):
+                    check_attack_after_move(ship, old_pos, True)
+                    if pending_attack:
+                        resolve_pending_attack_once()
+                    ai_sell_gold_after_attack(player, gold_bought)
+                    history_events.append(
+                        HistoryEvent(
+                            round_number,
+                            "ai",
+                            f"{agent.name} attacked a priority port",
+                            [f"{ship.name}", f"{display_place_name(old_location)} -> {display_place_name(attack_destination)}"],
+                        )
+                    )
+                    mark_ship_done(ship)
+                    continue
+            own_ports = [name for name in destinations if MAP_NODES[name].owner == player.country]
+            neutral_or_pirate = [
+                name
+                for name in destinations
+                if MAP_NODES[name].owner in (None, "Pirates")
+            ]
+            pool = own_ports or neutral_or_pirate or destinations
+            destination = random.choice(pool)
+            old_location = ship.location
+            old_pos = ship_screen_position(ship)
+            if move_ship_toward(ship, destination, players, active_news, round_number):
+                baseline_agent.decisions += 1
+                if not ship_is_enroute(ship):
+                    process_ship_arrival(ship)
+                    ship.attack_on_arrival = False
+                    complete_trade_if_ready(ship, players, round_number, history_events, last_trade_summary)
+                history_events.append(
+                    HistoryEvent(
+                        round_number=round_number,
+                        kind="ai",
+                        title=f"{player.country} AI moved a ship",
+                        details=[
+                            f"{ship.name}",
+                            f"{display_place_name(old_location)} -> {display_place_name(destination)}",
+                        ],
+                    )
+                )
+                check_attack_after_move(ship, old_pos, False)
+                if pending_attack:
+                    resolve_pending_attack_once()
+            mark_ship_done(ship)
+        remember_ai_result(agent, before_metrics, ai_metrics(player))
+        if not pending_attack and not game_over:
+            ai_turn_wait_until = 0 if auto_simulation_active else pygame.time.get_ticks() + 450
+            next_player_turn()
+
     begin_active_player_turn()
 
     while running:
@@ -7698,11 +9507,55 @@ def main() -> int:
         if selected_ship not in current_operable_ships:
             selected_ship = None
         current_ship = selected_ship
+        if (
+            not human_selection_open
+            and not identity_screen_open
+            and not game_over
+            and not pending_attack
+            and not news_popup_events
+            and not market_open
+            and not trade_card_open
+            and not pirate_intel_open
+            and not treaty_open
+            and not transfer_open
+            and not history_open
+            and not build_open
+            and not new_ship_open
+            and not rules_open
+            and not overview_open
+            and active_player_is_ai()
+            and pygame.time.get_ticks() >= ai_turn_wait_until
+        ):
+            run_ai_turn()
+            continue
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 running = False
+            elif human_selection_open:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_F11:
+                        fullscreen = not fullscreen
+                        screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), display_flags(fullscreen))
+                    elif event.key == pygame.K_ESCAPE:
+                        running = False
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if auto_simulation_rect.collidepoint(event.pos):
+                        start_auto_simulation()
+                    elif human_selection_start_rect.collidepoint(event.pos) and human_countries:
+                        human_selection_open = False
+                        selected_idx = active_player_idx
+                        begin_active_player_turn()
+                    else:
+                        for country, rect in human_country_rects:
+                            if rect.collidepoint(event.pos):
+                                if country in human_countries:
+                                    human_countries.remove(country)
+                                else:
+                                    human_countries.add(country)
+                                break
+                continue
             elif identity_screen_open:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_F11:
@@ -8185,8 +10038,9 @@ def main() -> int:
                 clicked_tab = False
                 for idx, rect in enumerate(player_tab_rects):
                     if rect.collidepoint(event.pos):
-                        selected_idx = idx
-                        transaction_scroll = 0
+                        if players[idx].country in human_countries:
+                            selected_idx = idx
+                            transaction_scroll = 0
                         clicked_tab = True
                 if ports_card_rect.collidepoint(event.pos):
                     ports_expanded = not ports_expanded
@@ -8304,6 +10158,19 @@ def main() -> int:
             elif event.type == pygame.MOUSEMOTION and dragging_map:
                 pan_map(last_drag_pos[0] - event.pos[0], last_drag_pos[1] - event.pos[1])
                 last_drag_pos = event.pos
+
+        if human_selection_open:
+            human_country_rects, human_selection_start_rect, auto_simulation_rect = draw_human_country_selection_page(
+                screen,
+                title_font,
+                font,
+                small_font,
+                human_countries,
+                mouse_pos,
+            )
+            pygame.display.flip()
+            clock.tick(FPS)
+            continue
 
         if identity_screen_open:
             identity_card_rects, identity_start_rect = draw_identity_page(
@@ -8497,6 +10364,15 @@ def main() -> int:
             last_trade_summary,
             transaction_scroll,
             side_panel_scroll,
+        )
+        controller_label = "AI thinking..." if active_player_is_ai() else "Human turn"
+        controller_color = (255, 214, 109) if active_player_is_ai() else (82, 196, 114)
+        draw_text(
+            screen,
+            small_font,
+            f"Controller: {controller_label}",
+            (SCREEN_WIDTH - SIDE_PANEL_WIDTH + 18, 76),
+            controller_color,
         )
         selected_player = players[selected_idx]
         hovered_tab_player = None
