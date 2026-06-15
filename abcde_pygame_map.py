@@ -147,8 +147,8 @@ SHIP_COSTS = {
 SHIP_COST = SHIP_COSTS["Merchant"]
 RUSSIA_SHIP_COST = {"money": 20, "wood_or_metal": 1}
 LICENSES = {
-    "smuggler": {"label": "Smuggler's License", "price": 500, "renewal": 200},
-    "pirate": {"label": "Pirate's License", "price": 800, "renewal": 300},
+    "smuggler": {"label": "Smuggler's License", "price": 500, "renewal": 100},
+    "pirate": {"label": "Pirate's License", "price": 800, "renewal": 200},
 }
 LICENSE_DURATION_ROUNDS = 10
 LICENSE_RENEW_WINDOW = 3
@@ -210,7 +210,7 @@ GAME_RULES = [
     "Market",
     "Resources can be bought and sold at current market prices. Prices react to wars, news, and cooling periods.",
     "Letter Of Marque",
-    "Smuggler's License costs $500 and renewal costs $200. It allows entry into any non-plague port without fees. Pirate's License costs $800 and renewal costs $300. It lets merchant ships rob enemy merchants as privateers. Licenses last 10 rounds and can be renewed in the last 3 rounds.",
+    "Smuggler's License costs $500 and renewal costs $100. It allows entry into any non-plague port without fees. Pirate's License costs $800 and renewal costs $200. It includes smuggler access and lets merchant ships rob enemy merchants as privateers. Licenses last 10 rounds and can be renewed in the last 3 rounds.",
     "Factories",
     "Green and red factories produce resources every 5 rounds. Shipyard factories build ships. United States pays half factory building fee but normal materials. Pirates cannot build shipyard factories.",
     "Ship Building",
@@ -762,6 +762,11 @@ class TradeCard:
     profit: int
     status: str = "undeclared"
     stolen_from: str | None = None
+    insurance_active: bool = False
+    insurance_premium: int = 0
+    insurance_compensation: int = 0
+    insurance_bought_round: int = 0
+    insurance_factor: float = 0.8
 
 
 @dataclass
@@ -837,10 +842,20 @@ class PlayerState:
     ships: list[Ship]
     trade_cards: list[TradeCard]
     licenses: dict[str, int]
+    license_history: set[str] = field(default_factory=set)
     transactions: list[str] = field(default_factory=list)
     oil_power_until: int = 0
     cash_history: list[int] = field(default_factory=list)
     historic_cash_peak_3_rounds: int = 0
+    trade_profit_total: int = 0
+    trade_cost_total: int = 0
+    trade_insurance_paid: int = 0
+    pirate_intel_cost_total: int = 0
+    pirate_protection_fee_total: int = 0
+    insurance_factor: float = 0.8
+    first_insurance_round: int = 0
+    last_trade_rob_round: int = -999
+    merchant_pirate_port_entries: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -861,6 +876,15 @@ class MapNode:
     storage_capacity: int = 3
     pirate_block_until: int = 0
     pirate_rob_power_penalty_until: int = 0
+    port_insurance_active: bool = False
+    port_insurance_premium: int = 0
+    port_insurance_compensation: int = 0
+    port_insurance_start_round: int = 0
+    port_insurance_payments: int = 0
+    port_insurance_last_paid_round: int = 0
+    port_insurance_last_cancel_round: int = -999
+    port_insurance_last_comp_round: int = -999
+    port_open_free_since: int = 0
 
 
 def canonical_notebook_name(name: str) -> str:
@@ -1284,6 +1308,13 @@ def randomize_game() -> list[PlayerState]:
         node.entry_mode = "default"
         node.entry_countries.clear()
         node.free_entry_countries.clear()
+        node.port_insurance_active = False
+        node.port_insurance_premium = 0
+        node.port_insurance_compensation = 0
+        node.port_insurance_start_round = 0
+        node.port_insurance_payments = 0
+        node.port_insurance_last_paid_round = 0
+        node.port_open_free_since = 0
         if node.kind == "capital":
             node.owner = next(country for country, capital in CAPITALS.items() if capital == node.name)
             continue
@@ -1399,12 +1430,266 @@ def charge_ship_arrival_upkeep(
 def collect_ship_maintenance(players: list[PlayerState], round_number: int) -> dict[str, int]:
     costs = {}
     for player in players:
-        cost = sum(5 for ship in player.ships if ship.kind != "Merchant")
+        ship_cost = sum(5 for ship in player.ships if ship.kind != "Merchant")
+        factory_cost = sum(
+            20 if node.factory_level == "red" else 10
+            for node in MAP_NODES.values()
+            if node.factory_owner == player.country and node.factory_level
+        )
+        cost = ship_cost + factory_cost
         player.money -= cost
         costs[player.country] = cost
         if cost:
-            record_transaction(player, round_number, -cost, "non-merchant upkeep")
+            record_transaction(player, round_number, -cost, "non-merchant and factory upkeep")
     return costs
+
+
+TRANSFER_ROADS = {
+    tuple(sorted(pair))
+    for pair in [
+        ("Acapulco", "Veracruz"),
+        ("Panama_City", "Colon"),
+        ("Murmansk", "St_Pertersburg"),
+        ("Suez_City", "Port_Said"),
+    ]
+}
+
+
+def route_uses_transfer_road(card: TradeCard) -> bool:
+    start = trade_label_to_node(card.start)
+    end = trade_label_to_node(card.end)
+    if not start or not end:
+        return False
+    path = shortest_course_path(start, end)
+    return any(tuple(sorted((a, b))) in TRANSFER_ROADS for a, b in zip(path, path[1:]))
+
+
+def pirate_near_port(port_name: str, players: list[PlayerState], max_distance: int = 5) -> bool:
+    for player in players:
+        if player.country != "Pirates":
+            continue
+        for ship in player.ships:
+            if ship.kind != "Pirate" or ship_is_enroute(ship):
+                continue
+            distance = shortest_course_distance(ship.location, port_name)
+            if distance is not None and distance <= max_distance:
+                return True
+    return False
+
+
+def recent_trade_rob_count(history_events: list[HistoryEvent], owner: str, round_number: int, start_age: int, end_age: int) -> int:
+    count = 0
+    for event in history_events:
+        age = round_number - event.round_number
+        if age < start_age or age >= end_age or event.kind != "rob":
+            continue
+        text = " ".join([event.title, *event.details])
+        if owner in text:
+            count += 1
+    return count
+
+
+def transfer_usage_count(history_events: list[HistoryEvent], owner: str, round_number: int) -> int:
+    count = 0
+    for event in history_events:
+        if event.kind != "trade" or round_number - event.round_number > 20 or owner not in event.title:
+            continue
+        route_line = event.details[0] if event.details else ""
+        if " -> " not in route_line:
+            continue
+        start, end = route_line.split(" -> ", 1)
+        if route_uses_transfer_road(TradeCard(start, end, 0)):
+            count += 1
+    return count
+
+
+def merchant_pirate_port_entry_count(player: PlayerState, round_number: int) -> int:
+    player.merchant_pirate_port_entries = [r for r in player.merchant_pirate_port_entries if round_number - r <= 20]
+    return len(player.merchant_pirate_port_entries)
+
+
+def trade_insurance_premium(
+    player: PlayerState,
+    card: TradeCard,
+    players: list[PlayerState],
+    history_events: list[HistoryEvent],
+    round_number: int,
+    late: bool = False,
+) -> int:
+    start = trade_label_to_node(card.start) or card.start
+    end = trade_label_to_node(card.end) or card.end
+    transfer_count = transfer_usage_count(history_events, player.country, round_number)
+    premium = card.profit * 0.10
+    premium += 20 if pirate_near_port(start, players) else 0
+    premium += 20 if pirate_near_port(end, players) else 0
+    premium += 20 * (1 - 1 / (transfer_count + 1))
+    premium += recent_trade_rob_count(history_events, player.country, round_number, 0, 5) * 15
+    premium += recent_trade_rob_count(history_events, player.country, round_number, 5, 10) * 10
+    premium += recent_trade_rob_count(history_events, player.country, round_number, 10, 15) * 5
+    premium += merchant_pirate_port_entry_count(player, round_number) * 5
+    if late:
+        premium *= 1.2
+    return max(1, int(round(premium)))
+
+
+def trade_insurance_risk_lines(
+    player: PlayerState,
+    card: TradeCard,
+    players: list[PlayerState],
+    history_events: list[HistoryEvent],
+    round_number: int,
+) -> list[str]:
+    start = trade_label_to_node(card.start) or card.start
+    end = trade_label_to_node(card.end) or card.end
+    return [
+        f"Premium: ${trade_insurance_premium(player, card, players, history_events, round_number)}",
+        f"Comp if robbed: ${int(card.profit * player.insurance_factor)}",
+        f"Pirate near start/end: {'Y' if pirate_near_port(start, players) else 'N'}/{'Y' if pirate_near_port(end, players) else 'N'}",
+        f"Rob history 15R: {recent_trade_rob_count(history_events, player.country, round_number, 0, 15)}",
+    ]
+
+
+def buy_trade_insurance(
+    player: PlayerState,
+    card: TradeCard,
+    players: list[PlayerState],
+    history_events: list[HistoryEvent],
+    round_number: int,
+    premium_pool: dict[str, int],
+    late: bool = False,
+) -> bool:
+    if card.insurance_active:
+        return False
+    premium = trade_insurance_premium(player, card, players, history_events, round_number, late)
+    if player.money < premium:
+        return False
+    player.money -= premium
+    player.trade_insurance_paid += premium
+    if player.first_insurance_round <= 0:
+        player.first_insurance_round = round_number
+    card.insurance_active = True
+    card.insurance_premium = premium
+    card.insurance_compensation = int(card.profit * player.insurance_factor)
+    card.insurance_bought_round = round_number
+    card.insurance_factor = player.insurance_factor
+    premium_pool["amount"] = premium_pool.get("amount", 0) + premium
+    record_transaction(player, round_number, -premium, "trade insurance premium")
+    history_events.append(
+        HistoryEvent(
+            round_number,
+            "insurance",
+            f"{player.country} bought trade insurance",
+            [f"{card.start} -> {card.end}", f"Premium: ${premium}", f"Compensation: ${card.insurance_compensation}"],
+        )
+    )
+    return True
+
+
+def pay_trade_insurance_compensation(
+    player: PlayerState,
+    card: TradeCard,
+    round_number: int,
+    history_events: list[HistoryEvent],
+    reason: str,
+    force_sell: bool = False,
+) -> int:
+    if not card.insurance_active:
+        return 0
+    if force_sell:
+        amount = min(100, max(50, math.ceil(card.insurance_premium / 2)))
+    else:
+        factor = card.insurance_factor
+        if card.profit < 650:
+            factor = min(factor, 0.7)
+        elif card.profit > 650:
+            factor = min(factor, 0.6)
+        amount = int(card.profit * factor)
+    player.money += amount
+    record_transaction(player, round_number, amount, f"trade insurance compensation: {reason}")
+    history_events.append(
+        HistoryEvent(
+            round_number,
+            "insurance",
+            f"{player.country} received trade insurance",
+            [f"{card.start} -> {card.end}", f"Reason: {reason}", f"Compensation: ${amount}"],
+        )
+    )
+    card.insurance_active = False
+    return amount
+
+
+def update_insurance_factor(player: PlayerState, round_number: int) -> None:
+    if round_number - player.last_trade_rob_round >= 5:
+        player.insurance_factor = min(0.8, player.insurance_factor + 0.1)
+    if player.first_insurance_round and player.insurance_factor >= 0.8 and round_number - player.first_insurance_round >= 10:
+        player.insurance_factor = max(player.insurance_factor, 0.85)
+    if player.insurance_factor >= 0.85 and any(route_uses_transfer_road(card) for card in player.trade_cards):
+        if round_number - player.last_trade_rob_round >= 5:
+            player.insurance_factor = max(player.insurance_factor, 0.95)
+
+
+def port_insurance_default_premium(node: MapNode, players: list[PlayerState], round_number: int | None = None) -> int:
+    premium = (node.tax or 0) * 0.2 + (node.fee or 0) * 0.1
+    if node.factory_level == "green":
+        premium += 1
+    elif node.factory_level == "red":
+        premium += 2
+    for player in players:
+        if player.country != "Russia":
+            continue
+        for ship in player.ships:
+            if ship.kind == "Warship" and not ship_is_enroute(ship):
+                distance = shortest_course_distance(ship.location, node.name)
+                if distance is not None and distance <= 5:
+                    premium += 5
+                    break
+    if node.entry_mode == "reject_all":
+        premium *= 2
+    elif (
+        node.entry_mode == "open_all"
+        and node.free_entry_countries
+        and len(node.free_entry_countries) >= len(EMPIRE_ORDER) - 1
+        and round_number is not None
+        and node.port_open_free_since
+        and round_number - node.port_open_free_since >= 5
+    ):
+        premium *= 0.5
+    return max(1, math.ceil(premium))
+
+
+def port_insurance_compensation(node: MapNode) -> int:
+    return int((node.tax or 0) + (node.fee or 0) + (10 if node.factory_level else 0))
+
+
+def buy_port_insurance(player: PlayerState, node: MapNode, players: list[PlayerState], round_number: int, history_events: list[HistoryEvent]) -> bool:
+    if node.port_insurance_active or round_number - node.port_insurance_last_comp_round < 5:
+        return False
+    premium = port_insurance_default_premium(node, players, round_number)
+    if player.money < premium:
+        return False
+    node.port_insurance_active = True
+    node.port_insurance_premium = premium
+    node.port_insurance_compensation = port_insurance_compensation(node)
+    node.port_insurance_start_round = round_number
+    node.port_insurance_payments = 0
+    node.port_insurance_last_paid_round = round_number
+    player.money -= premium
+    record_transaction(player, round_number, -premium, f"port insurance {display_place_name(node.name)}")
+    history_events.append(HistoryEvent(round_number, "insurance", f"{player.country} insured a port", [display_place_name(node.name), f"Premium: ${premium}", f"Compensation: ${node.port_insurance_compensation}"]))
+    return True
+
+
+def cancel_port_insurance(player: PlayerState, node: MapNode, round_number: int, history_events: list[HistoryEvent]) -> bool:
+    if not node.port_insurance_active or round_number - node.port_insurance_last_cancel_round < 5:
+        return False
+    payout = node.port_insurance_compensation if node.port_insurance_payments >= 3 else 0
+    if payout:
+        player.money += payout
+        record_transaction(player, round_number, payout, f"port insurance cancel compensation {display_place_name(node.name)}")
+    node.port_insurance_active = False
+    node.port_insurance_last_cancel_round = round_number
+    history_events.append(HistoryEvent(round_number, "insurance", f"{player.country} canceled port insurance", [display_place_name(node.name), f"Payout: ${payout}"]))
+    return True
 
 
 def clamp_non_gold_resources(player: PlayerState) -> None:
@@ -2042,6 +2327,24 @@ def shortest_course_path(start: str, goal: str) -> list[str]:
     return []
 
 
+def shortest_course_distance(start: str, goal: str) -> int | None:
+    if start == goal:
+        return 0
+    frontier = [(start, 0)]
+    seen = {start}
+    while frontier:
+        current, distance_so_far = frontier.pop(0)
+        for neighbor, distance in COURSE_GRAPH.get(current, []):
+            if neighbor in seen:
+                continue
+            new_distance = distance_so_far + distance
+            if neighbor == goal:
+                return new_distance
+            seen.add(neighbor)
+            frontier.append((neighbor, new_distance))
+    return None
+
+
 def update_cash_records(players: list[PlayerState]) -> None:
     for player in players:
         player.cash_history.append(player.money)
@@ -2190,11 +2493,15 @@ def player_has_license(
     players: list[PlayerState] | None = None,
     player: PlayerState | None = None,
 ) -> bool:
+    if license_key == "smuggler":
+        license_keys = ("smuggler", "pirate")
+    else:
+        license_keys = (license_key,)
     if player and player.country == country:
-        return license_key in player.licenses
+        return any(key in player.licenses for key in license_keys)
     if players:
         owner = player_by_country(players, country)
-        return bool(owner and license_key in owner.licenses)
+        return bool(owner and any(key in owner.licenses for key in license_keys))
     return False
 
 
@@ -2406,7 +2713,20 @@ def complete_trade_if_ready(
     else:
         return False
     player.money += profit
+    player.trade_profit_total += profit
     record_transaction(player, round_number, profit, f"trade {card.start} -> {card.end}")
+    if force_sell and card.insurance_active and not (port and port.owner == "Pirates"):
+        pay_trade_insurance_compensation(player, card, round_number, history_events, "forced sale", force_sell=True)
+    elif at_destination and card.insurance_active:
+        history_events.append(
+            HistoryEvent(
+                round_number,
+                "insurance",
+                f"{player.country} trade insurance expired",
+                [f"{card.start} -> {card.end}", "Arrived safely."],
+            )
+        )
+        card.insurance_active = False
     card.status = "interrupted" if force_sell and ship.kind == "Merchant" and not at_destination else "success"
     last_trade_summary[player.country] = f"+${profit} {card.start} -> {card.end}"
     route_start = trade_label_to_node(card.start) or ship.location
@@ -3052,7 +3372,7 @@ def draw_port_action_popup(
     pending_transfers: list[PendingGoodsTransfer],
     active_news: list[NewsEvent] | None = None,
     round_number: int | None = None,
-) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect]:
+) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect]:
     node = MAP_NODES[destination]
     pos = node_to_screen(destination)
     same_port = destination == ship.location
@@ -3069,7 +3389,9 @@ def draw_port_action_popup(
         and ship_can_attack(ship, player=player)
         and can_attack_defender(ship, node)
     )
-    can_declare = reachable_by_sea and declarable_trade_card_for_port(player, ship, destination) is not None
+    declarable_card = declarable_trade_card_for_port(player, ship, destination)
+    can_declare = reachable_by_sea and declarable_card is not None
+    can_declare_insure = can_declare and bool(declarable_card and not declarable_card.insurance_active)
     can_store = can_operate and can_store_good(ship, destination, port_storage_by_port)
     pickup_source = land_pickup_source_for_ship(ship, destination, port_storage_by_port, pending_transfers)
     can_pickup = can_operate and pickup_source is not None
@@ -3083,6 +3405,8 @@ def draw_port_action_popup(
         button_widths.append(52)
     if can_declare:
         button_widths.append(66)
+    if can_declare_insure:
+        button_widths.append(82)
     if can_speed:
         button_widths.append(62)
     if can_store:
@@ -3126,6 +3450,13 @@ def draw_port_action_popup(
         draw_text(surface, font, "Declare", (declare_rect.x + 6, declare_rect.y + 4), TEXT)
         button_x = declare_rect.right + 8
 
+    declare_insure_rect = pygame.Rect(0, 0, 0, 0)
+    if can_declare_insure:
+        declare_insure_rect = pygame.Rect(button_x, y + 30, 82, 24)
+        pygame.draw.rect(surface, (44, 108, 144), declare_insure_rect, border_radius=5)
+        draw_text(surface, font, "Decl+Ins", (declare_insure_rect.x + 6, declare_insure_rect.y + 4), TEXT)
+        button_x = declare_insure_rect.right + 8
+
     speed_rect = pygame.Rect(0, 0, 0, 0)
     if can_speed:
         speed_rect = pygame.Rect(button_x, y + 30, 62, 24)
@@ -3161,7 +3492,7 @@ def draw_port_action_popup(
         attack_rect = pygame.Rect(button_x, y + 30, button_width, 24)
         pygame.draw.rect(surface, (157, 63, 58), attack_rect, border_radius=5)
         draw_text(surface, font, attack_label, (attack_rect.x + 8, attack_rect.y + 4), TEXT)
-    return enter_rect, sell_rect, declare_rect, store_rect, pickup_rect, speed_rect, attack_rect
+    return enter_rect, sell_rect, declare_rect, declare_insure_rect, store_rect, pickup_rect, speed_rect, attack_rect
 
 
 def node_color(node: MapNode) -> tuple[int, int, int]:
@@ -3785,16 +4116,22 @@ def try_buy_license(
         return False
     if player.country == "Pirates":
         return False
+    if license_key == "smuggler" and "pirate" in player.licenses:
+        return False
     current_expiry = player.licenses.get(license_key)
     if current_expiry is not None and current_expiry - round_number > LICENSE_RENEW_WINDOW:
         return False
     is_renewal = current_expiry is not None and current_expiry >= round_number
-    price = LICENSES[license_key]["renewal" if is_renewal else "price"]
+    historically_owned = is_renewal or license_key in player.license_history
+    price = LICENSES[license_key]["renewal" if historically_owned else "price"]
     if player.money < price:
         return False
+    if license_key == "pirate":
+        player.licenses.pop("smuggler", None)
     player.money -= price
     base_round = max(current_expiry or round_number - 1, round_number - 1)
     player.licenses[license_key] = base_round + LICENSE_DURATION_ROUNDS
+    player.license_history.add(license_key)
     action = "renew" if is_renewal else "buy"
     record_transaction(player, round_number, -price, f"{action} {LICENSES[license_key]['label']} until R{player.licenses[license_key]}")
     return True
@@ -4056,6 +4393,29 @@ def try_sell_resource(
     return True
 
 
+def try_sell_all_resources(
+    player: PlayerState,
+    prices: dict[str, dict[str, int]],
+    round_number: int | None = None,
+) -> bool:
+    sold: list[str] = []
+    total = 0
+    for resource in RESOURCE_ORDER:
+        amount = player.resources.get(resource, 0)
+        if amount <= 0:
+            continue
+        income = amount * prices[resource]["sell"]
+        player.resources[resource] = 0
+        player.money += income
+        total += income
+        sold.append(f"{resource} x{amount}")
+    if not sold:
+        return False
+    if round_number is not None:
+        record_transaction(player, round_number, total, f"sell all resources: {', '.join(sold)}")
+    return True
+
+
 def dynamic_bill(cost: dict[str, int], prices: dict[str, dict[str, int]]) -> int:
     return (
         cost.get("base_money", 0)
@@ -4285,10 +4645,14 @@ def draw_trade_card_page(
     font: pygame.font.Font,
     small_font: pygame.font.Font,
     player: PlayerState,
+    players: list[PlayerState],
+    history_events: list[HistoryEvent],
+    round_number: int,
     trade_card_options: list[TradeCard],
     selected_card: TradeCard | None,
     confirmed: bool,
-) -> tuple[pygame.Rect, pygame.Rect, list[tuple[pygame.Rect, TradeCard]]]:
+    insurance_selected: bool,
+) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, list[tuple[pygame.Rect, TradeCard]]]:
     surface.fill((18, 28, 38))
     panel = pygame.Rect(170, 80, SCREEN_WIDTH - 340, SCREEN_HEIGHT - 160)
     pygame.draw.rect(surface, (240, 239, 229), panel, border_radius=8)
@@ -4306,6 +4670,9 @@ def draw_trade_card_page(
     confirm_enabled = selected_card is not None and not confirmed
     pygame.draw.rect(surface, (42, 130, 79) if confirm_enabled else (130, 138, 142), confirm_rect, border_radius=6)
     draw_text(surface, small_font, "Confirm" if not confirmed else "Confirmed", (confirm_rect.x + 12, confirm_rect.y + 8), TEXT)
+    insurance_rect = pygame.Rect(panel.right - 330, panel.y + 24, 106, 32)
+    pygame.draw.rect(surface, (44, 108, 144) if insurance_selected else (132, 142, 149), insurance_rect, border_radius=6)
+    draw_text(surface, small_font, "Insured" if insurance_selected else "Insurance", (insurance_rect.x + 12, insurance_rect.y + 8), TEXT)
 
     option_rects: list[tuple[pygame.Rect, TradeCard]] = []
     cards_y = y + 78
@@ -4336,6 +4703,10 @@ def draw_trade_card_page(
         draw_text(surface, font, f"Profit: ${card.profit}", (card_rect.x + 20, card_rect.y + 207), (42, 105, 72))
         if selected:
             draw_text(surface, small_font, "Selected", (card_rect.right - 78, card_rect.y + 21), (42, 105, 72))
+            risk_y = card_rect.y + 42
+            for line in trade_insurance_risk_lines(player, card, players, history_events, round_number):
+                draw_text(surface, small_font, line, (card_rect.x + 132, risk_y), (58, 72, 82))
+                risk_y += 17
     info_x = x
     info_y = cards_y + card_h + 22
     draw_text(surface, font, "Trade Info", (info_x, info_y), (22, 38, 52))
@@ -4365,7 +4736,7 @@ def draw_trade_card_page(
             draw_text(surface, small_font, f"+ {len(player.trade_cards) - 8} older cards", (list_x, list_y), (87, 101, 112))
 
     draw_text(surface, small_font, "Esc or Close returns to the map.", (panel.x + 38, panel.bottom - 38), (87, 101, 112))
-    return close_rect, confirm_rect, option_rects
+    return close_rect, confirm_rect, insurance_rect, option_rects
 
 
 def draw_pirate_intel_line(
@@ -4438,7 +4809,7 @@ def draw_market_page(
     prices: dict[str, dict[str, int]],
     round_number: int,
     scroll_offset: int,
-) -> tuple[pygame.Rect, dict[str, pygame.Rect], dict[str, pygame.Rect], dict[str, pygame.Rect], int]:
+) -> tuple[pygame.Rect, dict[str, pygame.Rect], dict[str, pygame.Rect], pygame.Rect, dict[str, pygame.Rect], int]:
     surface.fill((20, 28, 36))
     panel = pygame.Rect(140, 80, SCREEN_WIDTH - 280, SCREEN_HEIGHT - 160)
     pygame.draw.rect(surface, (238, 241, 236), panel, border_radius=8)
@@ -4452,6 +4823,10 @@ def draw_market_page(
     close_rect = pygame.Rect(panel.right - 104, panel.y + 24, 70, 32)
     pygame.draw.rect(surface, (78, 91, 103), close_rect, border_radius=6)
     draw_text(surface, small_font, "Close", (close_rect.x + 18, close_rect.y + 8), TEXT)
+    sell_all_rect = pygame.Rect(panel.right - 224, panel.y + 24, 100, 32)
+    has_resources = any(player.resources.get(resource, 0) > 0 for resource in RESOURCE_ORDER)
+    pygame.draw.rect(surface, (157, 97, 54) if has_resources else (130, 138, 142), sell_all_rect, border_radius=6)
+    draw_text(surface, small_font, "Sell All", (sell_all_rect.x + 22, sell_all_rect.y + 8), TEXT)
 
     content_top = panel.y + 100
     content_bottom = panel.bottom - 52
@@ -4503,21 +4878,27 @@ def draw_market_page(
         owned = expiry is not None
         can_renew = owned and expiry - round_number <= LICENSE_RENEW_WINDOW
         pirate_blocked = player.country == "Pirates"
-        license_price = info["renewal"] if can_renew else info["price"]
-        can_buy = can_take_action(player) and player.money >= license_price and not pirate_blocked and (not owned or can_renew)
+        blocked_by_pirate = license_key == "smuggler" and "pirate" in player.licenses
+        historically_owned = can_renew or license_key in player.license_history
+        license_price = info["renewal"] if historically_owned else info["price"]
+        can_buy = can_take_action(player) and player.money >= license_price and not pirate_blocked and not blocked_by_pirate and (not owned or can_renew)
         if row.bottom >= content_top and row.top <= content_bottom:
             pygame.draw.rect(surface, (225, 231, 227), row, border_radius=6)
             draw_license_glyph(surface, license_key, pygame.Rect(x, y + 8, 46, 32), small_font)
             draw_text(surface, font, info["label"], (x + 62, y + 8), (22, 38, 52))
             if pirate_blocked:
                 detail = "Pirates cannot buy licenses"
+            elif blocked_by_pirate:
+                detail = "Pirate's License includes smuggler access"
             elif owned:
                 detail = f"Expires R{expiry}; renewal ${info['renewal']} opens R{expiry - LICENSE_RENEW_WINDOW}"
+            elif license_key in player.license_history:
+                detail = f"Repurchase: ${license_price}; valid {LICENSE_DURATION_ROUNDS} rounds"
             else:
                 detail = f"Price: ${license_price}; valid {LICENSE_DURATION_ROUNDS} rounds"
             draw_text(surface, small_font, detail, (x + 62, y + 35), (58, 72, 82))
             pygame.draw.rect(surface, (54, 130, 94) if can_buy else (130, 138, 142), buy_rect, border_radius=6)
-            button_label = "Blocked" if pirate_blocked else ("Renew" if can_renew else ("Owned" if owned else "Buy"))
+            button_label = "Blocked" if pirate_blocked or blocked_by_pirate else ("Renew" if can_renew else ("Owned" if owned else "Buy"))
             draw_text(surface, small_font, button_label, (buy_rect.x + 32, buy_rect.y + 9), TEXT)
         y += 86
     surface.set_clip(previous_clip)
@@ -4527,7 +4908,7 @@ def draw_market_page(
     if max_scroll:
         draw_text(surface, small_font, "Use mouse wheel to scroll.", (panel.right - 230, panel.bottom - 38), (87, 101, 112))
     draw_text(surface, small_font, "Esc or Close returns to the map.", (panel.x + 34, panel.bottom - 38), (87, 101, 112))
-    return close_rect, buy_rects, sell_rects, license_rects, max_scroll
+    return close_rect, buy_rects, sell_rects, sell_all_rect, license_rects, max_scroll
 
 
 def draw_build_page(
@@ -4613,6 +4994,7 @@ def draw_arrange_page(
     font: pygame.font.Font,
     small_font: pygame.font.Font,
     player: PlayerState,
+    players: list[PlayerState],
     scroll: int,
     prices: dict[str, dict[str, int]],
 ) -> tuple[pygame.Rect, list[tuple[str, str, str, pygame.Rect]], int]:
@@ -4669,6 +5051,12 @@ def draw_arrange_page(
         draw_text(surface, small_font, f"Factory: {factory_text}", (x, y + 48), (58, 72, 82))
         entry_text = "Pirate ports: open/free" if player.country == "Pirates" else port_entry_policy_line(node)
         draw_text(surface, small_font, f"Entry: {entry_text}", (x, y + 70), (58, 72, 82))
+        insurance_text = (
+            f"Insured ${node.port_insurance_premium}/{node.port_insurance_compensation} paid {node.port_insurance_payments}/3"
+            if node.port_insurance_active
+            else f"Insurance ${port_insurance_default_premium(node, players)} -> ${port_insurance_compensation(node)}"
+        )
+        draw_text(surface, small_font, insurance_text, (x + 420, y + 70), (58, 72, 82))
         if node.free_entry_countries:
             free_text = ", ".join(OWNER_LEGEND_LABELS.get(country, country) for country in sorted(node.free_entry_countries))
             draw_text(surface, small_font, f"Free: {free_text}", (x + 170, y + 70), (58, 72, 82))
@@ -4720,6 +5108,12 @@ def draw_arrange_page(
             enabled = can_build_factory(player, node, action, prices)
             pygame.draw.rect(surface, color if enabled else (130, 138, 142), rect, border_radius=5)
             draw_text(surface, small_font, label, (rect.x + 8, rect.y + 5), TEXT)
+        insure_label = "Cancel" if node.port_insurance_active else "Insure"
+        insure_action = "cancel_insurance" if node.port_insurance_active else "insure_port"
+        insure_rect = pygame.Rect(x + 1154, y + 74, 80, 24)
+        action_rects.append((insure_action, node.name, "", insure_rect))
+        pygame.draw.rect(surface, (44, 108, 144), insure_rect, border_radius=5)
+        draw_text(surface, small_font, insure_label, (insure_rect.x + 8, insure_rect.y + 5), TEXT)
         y += 112
         if y > panel.bottom - 72:
             break
@@ -5523,7 +5917,7 @@ def transfer_captured_port_storage(
     return transferred
 
 
-EXPORT_HISTORY_KINDS = {"invest", "war", "resources", "factory", "news", "price", "tax", "license", "trade"}
+EXPORT_HISTORY_KINDS = {"invest", "war", "resources", "factory", "news", "price", "tax", "license", "trade", "insurance"}
 
 
 def history_line(event: HistoryEvent) -> str:
@@ -5579,19 +5973,27 @@ def evaluate_players(
     metrics: dict[str, dict[str, float]] = {}
     for player in players:
         factories = sum(1 for node in MAP_NODES.values() if node.factory_owner == player.country and node.factory_level)
+        red_factories = sum(1 for node in MAP_NODES.values() if node.factory_owner == player.country and node.factory_level == "red")
         gold_cash = player.resources.get("gold", 0) * active_prices["gold"]["sell"]
         resource_value = sum(
             player.resources.get(resource, 0) * active_prices[resource]["sell"]
             for resource in RESOURCE_ORDER
             if resource != "gold"
         )
-        trade_success = sum(1 for card in player.trade_cards if card.status == "success")
+        trade_net = (
+            player.trade_profit_total
+            - player.trade_cost_total
+            - player.trade_insurance_paid
+            if player.country != "Pirates"
+            else player.trade_profit_total - player.pirate_intel_cost_total + player.pirate_protection_fee_total
+        )
         metrics[player.country] = {
             "money": float(player.money + gold_cash),
             "ports": float(len(player.ports)),
             "factories": float(factories),
+            "red_factories": float(red_factories),
             "resources": float(resource_value),
-            "trade": float(trade_success),
+            "trade": float(trade_net),
             "war": float(winrates[player.country]),
         }
     board_points = [250, 200, 150, 100, 50, 0]
@@ -5606,7 +6008,10 @@ def evaluate_players(
         "war": "war",
     }
     for key, label in labels.items():
-        ranked = sorted(players, key=lambda player: (metrics[player.country][key], player.country), reverse=True)
+        if key == "factories":
+            ranked = sorted(players, key=lambda player: (metrics[player.country]["factories"], metrics[player.country]["red_factories"], player.country), reverse=True)
+        else:
+            ranked = sorted(players, key=lambda player: (metrics[player.country][key], player.country), reverse=True)
         for idx, player in enumerate(ranked):
             points = board_points[idx]
             score_by_country[player.country] += points
@@ -5616,7 +6021,7 @@ def evaluate_players(
         (
             f"{idx + 1}. {player.country}: score {score_by_country[player.country]} | "
             f"money ${player.money} | gold-as-cash ${int(metrics[player.country]['money'])} | "
-            f"ports {len(player.ports)} | factories {int(metrics[player.country]['factories'])} | "
+            f"ports {len(player.ports)} | factories {int(metrics[player.country]['factories'])} | trade-net ${int(metrics[player.country]['trade'])} | "
             f"war winrate {winrates[player.country]:.0%} | " + "; ".join(detail_by_country[player.country])
         )
         for idx, player in enumerate(rows)
@@ -6685,6 +7090,7 @@ def main() -> int:
     market_close_rect = pygame.Rect(0, 0, 0, 0)
     market_buy_rects: dict[str, pygame.Rect] = {}
     market_sell_rects: dict[str, pygame.Rect] = {}
+    market_sell_all_rect = pygame.Rect(0, 0, 0, 0)
     market_license_rects: dict[str, pygame.Rect] = {}
     market_scroll = 0
     market_max_scroll = 0
@@ -6716,10 +7122,15 @@ def main() -> int:
     trade_card_open = False
     trade_card_close_rect = pygame.Rect(0, 0, 0, 0)
     trade_card_confirm_rect = pygame.Rect(0, 0, 0, 0)
+    trade_card_insurance_rect = pygame.Rect(0, 0, 0, 0)
     trade_card_option_rects: list[tuple[pygame.Rect, TradeCard]] = []
     trade_card_options: list[TradeCard] = []
     selected_trade_card: TradeCard | None = None
+    selected_trade_card_insured = False
     trade_card_confirmed = False
+    pirate_threat_index = 1
+    pirate_rob_window_count = 0
+    pirate_premium_pool: dict[str, int] = {"amount": 0}
     pirate_intel_open = False
     pirate_intel_close_rect = pygame.Rect(0, 0, 0, 0)
     pirate_intel_lines: list[str] = []
@@ -6790,6 +7201,7 @@ def main() -> int:
     port_enter_rect = pygame.Rect(0, 0, 0, 0)
     port_sell_rect = pygame.Rect(0, 0, 0, 0)
     port_declare_rect = pygame.Rect(0, 0, 0, 0)
+    port_declare_insure_rect = pygame.Rect(0, 0, 0, 0)
     port_store_rect = pygame.Rect(0, 0, 0, 0)
     port_pickup_rect = pygame.Rect(0, 0, 0, 0)
     port_speed_rect = pygame.Rect(0, 0, 0, 0)
@@ -6915,6 +7327,7 @@ def main() -> int:
         nonlocal round_number, acted_ship_ids, last_tax_summary, last_resource_summary, last_storage_fee_summary
         nonlocal last_maintenance_summary, last_price_drop_round, news_popup_events, news_popup_until
         nonlocal pirate_intel_clicks
+        nonlocal pirate_threat_index, pirate_rob_window_count, pirate_premium_pool
         completed_round = round_number
         update_cash_records(players)
         round_number += 1
@@ -6927,6 +7340,41 @@ def main() -> int:
                 node.pirate_block_until = 0
             if node.pirate_rob_power_penalty_until and node.pirate_rob_power_penalty_until < round_number:
                 node.pirate_rob_power_penalty_until = 0
+            if node.entry_mode == "open_all" and len(node.free_entry_countries) >= len(EMPIRE_ORDER) - 1:
+                node.port_open_free_since = node.port_open_free_since or round_number
+            else:
+                node.port_open_free_since = 0
+        if (round_number - 1) % 5 == 0:
+            if pirate_rob_window_count >= 3:
+                pirate_threat_index = 4
+            elif pirate_rob_window_count >= 2:
+                pirate_threat_index = max(pirate_threat_index, 3)
+            elif pirate_rob_window_count >= 1:
+                pirate_threat_index = max(1, pirate_threat_index)
+            else:
+                pirate_threat_index = max(1, pirate_threat_index - 1)
+            rate = 0.10 if pirate_threat_index <= 2 else (0.30 if pirate_threat_index == 3 else 0.40)
+            fee = int(pirate_premium_pool.get("amount", 0) * rate)
+            pirate_player = player_by_country(players, "Pirates")
+            if pirate_player and fee:
+                pirate_player.money += fee
+                pirate_player.pirate_protection_fee_total += fee
+                record_transaction(pirate_player, round_number, fee, "pirate protection fee")
+                history_events.append(HistoryEvent(round_number, "insurance", "Pirates received protection fee", [f"Threat index: {pirate_threat_index}", f"Fee: ${fee}"]))
+            pirate_rob_window_count = 0
+            pirate_premium_pool = {"amount": 0}
+            for player in players:
+                update_insurance_factor(player, round_number)
+            for node in MAP_NODES.values():
+                if node.port_insurance_active and node.port_insurance_payments < 3 and node.owner:
+                    owner = player_by_country(players, node.owner)
+                    if owner:
+                        premium = port_insurance_default_premium(node, players, round_number)
+                        node.port_insurance_premium = premium
+                        owner.money -= premium
+                        node.port_insurance_payments += 1
+                        node.port_insurance_last_paid_round = round_number
+                        record_transaction(owner, round_number, -premium, f"port insurance installment {display_place_name(node.name)}")
         expire_player_licenses(players, round_number)
         expire_news_events(active_news, resource_prices, round_number, history_events)
         sunk_counts = sink_overdue_ships()
@@ -7025,7 +7473,7 @@ def main() -> int:
 
     def resolve_pending_attack_once() -> None:
         nonlocal attack_result, last_price_drop_round, selected_ship, combat_popup_text, combat_popup_until
-        nonlocal pirate_last_rob_round, pirate_port_raid_bonus_until
+        nonlocal pirate_last_rob_round, pirate_port_raid_bonus_until, pirate_rob_window_count
         if not pending_attack:
             return
         attacker_player = player_by_country(players, pending_attack.attacker.owner)
@@ -7039,6 +7487,20 @@ def main() -> int:
             isinstance(pending_attack.defender, Ship)
             and pending_attack.defender.kind == "Merchant"
             and pending_attack.defender.trade_card is not None
+        )
+        robbed_trade_card = (
+            pending_attack.defender.trade_card
+            if isinstance(pending_attack.defender, Ship)
+            and pending_attack.defender.kind == "Merchant"
+            and combat_action(pending_attack)[0] == "rob"
+            else None
+        )
+        robbed_trade_owner = (
+            pending_attack.defender.owner
+            if isinstance(pending_attack.defender, Ship)
+            and pending_attack.defender.kind == "Merchant"
+            and combat_action(pending_attack)[0] == "rob"
+            else None
         )
         pirate_robbed_merchant_owner = (
             pending_attack.defender.owner
@@ -7061,6 +7523,16 @@ def main() -> int:
                 pirate_robbed_merchant_owner,
                 attack_result.get("winner") == "Pirates",
             )
+        if robbed_trade_owner:
+            robbed_player = player_by_country(players, robbed_trade_owner)
+            if robbed_player:
+                robbed_player.last_trade_rob_round = round_number
+                if robbed_player.insurance_factor > 0.8:
+                    robbed_player.insurance_factor = 0.8
+                if robbed_trade_card and attack_result.get("winner") == pending_attack.attacker.owner:
+                    pay_trade_insurance_compensation(robbed_player, robbed_trade_card, round_number, history_events, "robbed")
+        if pending_attack.attacker.owner == "Pirates" and attack_result.get("action_kind") == "rob":
+            pirate_rob_window_count += 1
         if (
             pending_attack.attacker.owner == "Pirates"
             and attack_result.get("action_kind") == "rob"
@@ -7096,6 +7568,18 @@ def main() -> int:
         combat_popup_until = pygame.time.get_ticks() + 5000
         captured_port = str(attack_result.get("captured_port") or "")
         if captured_port:
+            captured_node = MAP_NODES.get(captured_port)
+            defender_country = str(attack_result.get("defender") or "")
+            previous_owner = player_by_country(players, defender_country)
+            if captured_node and captured_node.port_insurance_active and previous_owner:
+                completed = captured_node.port_insurance_payments >= 3
+                payout = captured_node.port_insurance_compensation * (2 if completed else 0.5)
+                payout = int(payout)
+                previous_owner.money += payout
+                captured_node.port_insurance_active = False
+                captured_node.port_insurance_last_comp_round = round_number
+                record_transaction(previous_owner, round_number, payout, f"port insurance captured {display_place_name(captured_port)}")
+                history_events.append(HistoryEvent(round_number, "insurance", f"{previous_owner.country} received port insurance", [display_place_name(captured_port), f"Compensation: ${payout}"]))
             transferred = transfer_captured_port_storage(captured_port, str(attack_result["winner"]), players, port_storage_by_port)
             if transferred:
                 history_events.append(
@@ -7118,6 +7602,10 @@ def main() -> int:
     def process_ship_arrival(ship: Ship) -> None:
         charge_ship_arrival_upkeep(ship, players, round_number, history_events)
         charge_arrival_fee(ship, players, round_number)
+        player = player_by_country(players, ship.owner)
+        port = MAP_NODES.get(ship.location)
+        if player and ship.kind == "Merchant" and port and port.owner == "Pirates":
+            player.merchant_pirate_port_entries.append(round_number)
         ship.last_port_round = round_number
 
     def record_sail_limit_action(ship: Ship, action_label: str) -> None:
@@ -7231,7 +7719,7 @@ def main() -> int:
         nonlocal players, selected_idx, active_player_idx, round_number, max_rounds, game_over, show_game_over_popup
         nonlocal game_over_evaluation, game_over_export_path
         nonlocal acted_ship_ids, ports_expanded, selected_ship
-        nonlocal trade_card_options, selected_trade_card, trade_card_confirmed, treaties
+        nonlocal trade_card_options, selected_trade_card, selected_trade_card_insured, trade_card_confirmed, treaties
         nonlocal pirate_intel_open, pirate_intel_lines, pirate_intel_clicks
         nonlocal last_tax_summary, last_resource_summary, last_maintenance_summary, last_storage_fee_summary
         nonlocal last_trade_summary, pending_ship_builds, port_storage_by_port, pending_goods_transfers
@@ -7243,7 +7731,7 @@ def main() -> int:
         nonlocal active_news, news_popup_events, news_popup_until
         nonlocal identity_screen_open, identity_card_countries, identity_selected_card
         nonlocal combat_popup_text, combat_popup_until
-        nonlocal pirate_last_rob_round, pirate_port_raid_bonus_until
+        nonlocal pirate_last_rob_round, pirate_port_raid_bonus_until, pirate_threat_index, pirate_rob_window_count, pirate_premium_pool
         players = randomize_game()
         for node in MAP_NODES.values():
             node.factory_level = None
@@ -7253,6 +7741,13 @@ def main() -> int:
             node.free_entry_countries.clear()
             node.pirate_block_until = 0
             node.pirate_rob_power_penalty_until = 0
+            node.port_insurance_active = False
+            node.port_insurance_premium = 0
+            node.port_insurance_compensation = 0
+            node.port_insurance_start_round = 0
+            node.port_insurance_payments = 0
+            node.port_insurance_last_paid_round = 0
+            node.port_open_free_since = 0
         selected_idx = 0
         active_player_idx = 0
         round_number = 1
@@ -7266,7 +7761,11 @@ def main() -> int:
         selected_ship = None
         trade_card_options = []
         selected_trade_card = None
+        selected_trade_card_insured = False
         trade_card_confirmed = False
+        pirate_threat_index = 1
+        pirate_rob_window_count = 0
+        pirate_premium_pool = {"amount": 0}
         pirate_intel_open = False
         pirate_intel_lines = []
         pirate_intel_clicks = 0
@@ -7317,6 +7816,7 @@ def main() -> int:
 
     def open_trade_card_choices() -> None:
         nonlocal trade_card_options, selected_trade_card, trade_card_open, market_open, trade_card_confirmed
+        nonlocal selected_trade_card_insured
         nonlocal pirate_intel_open, pirate_intel_lines, pirate_intel_clicks
         nonlocal history_open, build_open, new_ship_open, rules_open, overview_open
         player = players[selected_idx]
@@ -7327,6 +7827,7 @@ def main() -> int:
             if player.money < cost:
                 return
             player.money -= cost
+            player.pirate_intel_cost_total += cost
             pirate_intel_clicks += 1
             pirate_intel_lines, _targets = generate_pirate_intelligence(players, port_storage_by_port)
             record_transaction(player, round_number, -cost, "pirate intelligence")
@@ -7351,6 +7852,7 @@ def main() -> int:
         if player.money < cost or not can_take_action(player):
             return
         player.money -= cost
+        player.trade_cost_total += cost
         record_transaction(player, round_number, -cost, "draw trade cards")
         history_events.append(
             HistoryEvent(
@@ -7362,6 +7864,7 @@ def main() -> int:
         )
         trade_card_options = draw_trade_card_options()
         selected_trade_card = None
+        selected_trade_card_insured = False
         trade_card_confirmed = False
         trade_card_open = True
         market_open = False
@@ -7603,13 +8106,15 @@ def main() -> int:
         port_action_destination = None
         port_action_expires_at = 0
 
-    def declare_and_move_selected_ship_to(destination: str) -> None:
+    def declare_and_move_selected_ship_to(destination: str, insure: bool = False) -> None:
         nonlocal port_action_destination, port_action_expires_at
         current = selected_ship
         if not current:
             return
         if declare_trade_for_ship(active_player(), current, destination):
             if current.trade_card:
+                if insure and not current.trade_card.insurance_active:
+                    buy_trade_insurance(active_player(), current.trade_card, players, history_events, round_number, pirate_premium_pool, late=True)
                 history_events.append(
                     HistoryEvent(
                         round_number,
@@ -7870,6 +8375,7 @@ def main() -> int:
                 if market_close_rect.collidepoint(event.pos):
                     market_open = False
                 else:
+                    handled_market_click = False
                     for license_key, rect in market_license_rects.items():
                         if rect.collidepoint(event.pos):
                             if try_buy_license(selected_player, license_key, round_number):
@@ -7881,8 +8387,12 @@ def main() -> int:
                                         [f"Valid until R{selected_player.licenses[license_key]}"],
                                     )
                                 )
+                            handled_market_click = True
                             break
-                    else:
+                    if not handled_market_click and market_sell_all_rect.collidepoint(event.pos):
+                        try_sell_all_resources(selected_player, resource_prices, round_number)
+                        handled_market_click = True
+                    if not handled_market_click:
                         for resource, rect in market_buy_rects.items():
                             if rect.collidepoint(event.pos):
                                 try_buy_resource(selected_player, resource, resource_prices, round_number)
@@ -7930,6 +8440,10 @@ def main() -> int:
                             node = MAP_NODES[port_name]
                             if action_kind == "factory":
                                 build_factory(selected_player, node, value, resource_prices, round_number, history_events)
+                            elif action_kind == "insure_port":
+                                buy_port_insurance(selected_player, node, players, round_number, history_events)
+                            elif action_kind == "cancel_insurance":
+                                cancel_port_insurance(selected_player, node, round_number, history_events)
                             elif not can_arrange_port(selected_player, node):
                                 break
                             elif action_kind == "mode":
@@ -7970,8 +8484,19 @@ def main() -> int:
             elif trade_card_open and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if trade_card_close_rect.collidepoint(event.pos):
                     trade_card_open = False
+                elif trade_card_insurance_rect.collidepoint(event.pos) and selected_trade_card and not trade_card_confirmed:
+                    selected_trade_card_insured = not selected_trade_card_insured
                 elif trade_card_confirm_rect.collidepoint(event.pos) and selected_trade_card and not trade_card_confirmed:
                     selected_trade_card = choose_trade_card(players[selected_idx], selected_trade_card)
+                    if selected_trade_card_insured:
+                        buy_trade_insurance(
+                            players[selected_idx],
+                            selected_trade_card,
+                            players,
+                            history_events,
+                            round_number,
+                            pirate_premium_pool,
+                        )
                     history_events.append(
                         HistoryEvent(
                             round_number,
@@ -7985,6 +8510,7 @@ def main() -> int:
                     for rect, card in trade_card_option_rects:
                         if rect.collidepoint(event.pos):
                             selected_trade_card = card
+                            selected_trade_card_insured = False
                             break
             elif treaty_open and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if treaty_close_rect.collidepoint(event.pos):
@@ -8251,6 +8777,9 @@ def main() -> int:
                 if not clicked_tab and port_action_destination and port_declare_rect.collidepoint(event.pos):
                     declare_and_move_selected_ship_to(port_action_destination)
                     clicked_tab = True
+                if not clicked_tab and port_action_destination and port_declare_insure_rect.collidepoint(event.pos):
+                    declare_and_move_selected_ship_to(port_action_destination, insure=True)
+                    clicked_tab = True
                 if not clicked_tab and port_action_destination and port_store_rect.collidepoint(event.pos):
                     store_selected_ship_good()
                     clicked_tab = True
@@ -8388,6 +8917,7 @@ def main() -> int:
                 port_enter_rect.collidepoint(mouse_pos)
                 or port_sell_rect.collidepoint(mouse_pos)
                 or port_declare_rect.collidepoint(mouse_pos)
+                or port_declare_insure_rect.collidepoint(mouse_pos)
                 or port_store_rect.collidepoint(mouse_pos)
                 or port_pickup_rect.collidepoint(mouse_pos)
                 or port_speed_rect.collidepoint(mouse_pos)
@@ -8400,6 +8930,7 @@ def main() -> int:
         port_enter_rect = pygame.Rect(0, 0, 0, 0)
         port_sell_rect = pygame.Rect(0, 0, 0, 0)
         port_declare_rect = pygame.Rect(0, 0, 0, 0)
+        port_declare_insure_rect = pygame.Rect(0, 0, 0, 0)
         port_store_rect = pygame.Rect(0, 0, 0, 0)
         port_pickup_rect = pygame.Rect(0, 0, 0, 0)
         port_speed_rect = pygame.Rect(0, 0, 0, 0)
@@ -8442,6 +8973,7 @@ def main() -> int:
                 port_enter_rect,
                 port_sell_rect,
                 port_declare_rect,
+                port_declare_insure_rect,
                 port_store_rect,
                 port_pickup_rect,
                 port_speed_rect,
@@ -8572,7 +9104,7 @@ def main() -> int:
             )
 
         if market_open:
-            market_close_rect, market_buy_rects, market_sell_rects, market_license_rects, market_max_scroll = draw_market_page(
+            market_close_rect, market_buy_rects, market_sell_rects, market_sell_all_rect, market_license_rects, market_max_scroll = draw_market_page(
                 screen,
                 title_font,
                 font,
@@ -8616,6 +9148,7 @@ def main() -> int:
                 font,
                 small_font,
                 players[selected_idx],
+                players,
                 arrange_scroll,
                 resource_prices,
             )
@@ -8631,15 +9164,19 @@ def main() -> int:
                 resource_prices,
             )
         elif trade_card_open:
-            trade_card_close_rect, trade_card_confirm_rect, trade_card_option_rects = draw_trade_card_page(
+            trade_card_close_rect, trade_card_confirm_rect, trade_card_insurance_rect, trade_card_option_rects = draw_trade_card_page(
                 screen,
                 title_font,
                 font,
                 small_font,
                 players[selected_idx],
+                players,
+                history_events,
+                round_number,
                 trade_card_options,
                 selected_trade_card,
                 trade_card_confirmed,
+                selected_trade_card_insured,
             )
             hovered_trade_card = None
             for rect, card in trade_card_option_rects:
